@@ -2,7 +2,7 @@ const events = require("events");
 const net = require("net");
 
 class Main {
-  constructor(self, contacts = [], referrals = []) {
+  constructor(self, contacts = [], referrals = [], acceptAll = false) {
     this.uuid = self.uuid;
     this.priv = self.priv;
     this.pub = self.pub;
@@ -145,6 +145,7 @@ class Main {
     data = decrypt(this.priv, JSON.parse(data));
     console.log(data);
     let contact = this.contactFromUuid(data.from);
+    // TODO: acceptAll
     if (data.secret == contact.secret) {
       contact.connected = true;
       contact.try = 0;
