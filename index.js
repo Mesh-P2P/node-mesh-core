@@ -1,6 +1,5 @@
 const events = require("events");
 const net = require("net");
-const http = require("http");
 
 class Main {
   constructor(self, contacts = [], referrals = []) {
@@ -23,24 +22,7 @@ class Main {
     net
       .createServer(socket => {
         socket.on("data", data => {
-          data = JSON.parse(data);
-          console.log(data);
-          let contact = this.contactFromUuid(data.from);
-          contact.connected = true;
-          if (data.res != undefined) {
-            console.log(data.res);
-            this.events_.emit("id-" + data.res, data);
-          } else {
-            console.log(data.id);
-            socket.write(
-              JSON.stringify({
-                res: data.id,
-                IP: socket.remoteAddress,
-                port: socket.remotePort,
-                secret: contact.secret
-              })
-            );
-          }
+          this.handle_in(socket, data);
         });
       })
       .listen(this.port);
@@ -59,6 +41,9 @@ class Main {
         contact.try = 0;
         contact.connected = true;
         resolve();
+      });
+      contact.socket.on("data", data => {
+        this.handle_in(contact.socket, data);
       });
       contact.socket.on("close", () => {
         contact.connected = false;
@@ -99,13 +84,14 @@ class Main {
             secret: contact.secret,
             type: type,
             body: message,
-            id: id
+            id: id,
+            ip: contact.ip,
+            port: contact.port
           })
         )
       );
 
       this.events_.prependOnceListener("id-" + id, data => {
-        console.log(data);
         resolve(data);
       });
       /*contact.socket.prependOnceListener("data", data => {
@@ -114,50 +100,12 @@ class Main {
       });*/
       contact.socket.on("error", err => {
         console.log(err);
-        debugger;
         this.connect(contact).then(() => {
           this.send(contact, message, type)
             .then(res => resolve(res))
             .catch(err => reject(err));
         });
       });
-
-      /*const req = http.request(
-        {
-          agent: this.agent,
-          host: contact.ip,
-          port: contact.port,
-          localPort: this.port,
-          localAddress: this.ip,
-          method: "POST",
-          Connection: "keep-alive",
-          headers: encrypt(contact.pub, {
-            from: this.uuid,
-            secret: contact.secret,
-            type: type
-          })
-        },
-        res => {
-          let headers = decrypt(this.priv, res.headers);
-          let content = "";
-          res.on("data", data => {
-            content += data;
-          });
-          res.on("end", () => {
-            resolve({
-              body: content,
-              header: headers
-            });
-          });
-        }
-      );
-      req.on("error", err => {
-        // TODO
-        reject(err);
-      });
-
-      req.write(encrypt(contact.pub, message));
-      req.end();*/
     });
   }
   sendMessage(uuid, message) {
@@ -192,6 +140,47 @@ class Main {
     return this.contacts.find(contact => {
       return contact.ip === ip;
     });
+  }
+  handle_in(socket, data) {
+    data = decrypt(this.priv, JSON.parse(data));
+    console.log(data);
+    let contact = this.contactFromUuid(data.from);
+    if (data.secret == contact.secret) {
+      contact.connected = true;
+      contact.try = 0;
+      this.port = data.port;
+      this.ip = data.ip;
+      if (data.res != undefined) {
+        this.events_.emit("id-" + data.res, data);
+      } else {
+        switch (data.type) {
+          case "IP":
+            {
+            }
+            break;
+          case "message":
+            {
+              if (data.body != "") this.events.emit("message", data.body);
+            }
+            break;
+          case "referral":
+            {
+            }
+            break;
+          case "contact_req": {
+          }
+        }
+        socket.write(
+          JSON.stringify({
+            res: data.id,
+            ip: socket.remoteAddress,
+            port: socket.remotePort,
+            secret: contact.secret,
+            from: this.uuid
+          })
+        );
+      }
+    }
   }
 }
 exports.Main = Main;
