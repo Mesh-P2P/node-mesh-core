@@ -1,0 +1,23 @@
+{
+  "name": "mesh-core",
+  "version": "1.0.0",
+  "description": "node implmentation of Mesh",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mesh-P2P/node-mesh-core.git"
+  },
+  "keywords": [
+    "mesh",
+    "p2p"
+  ],
+  "author": "Aras",
+  "license": "GPL-3.0",
+  "bugs": {
+    "url": "https://github.com/Mesh-P2P/node-mesh-core/issues"
+  },
+  "homepage": "https://github.com/Mesh-P2P/node-mesh-core#readme"
+}
