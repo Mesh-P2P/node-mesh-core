@@ -92,6 +92,7 @@ instance2 = new mesh.Main(
     }
   }
 );
+instance2.contactFromUuid(7).on("data", data => console.log(data.toString()));
 setTimeout(() => {
   instance3 = new mesh.Main(
     {
@@ -138,6 +139,9 @@ setTimeout(() => {
       }
     }
   );
+  setTimeout(() => {
+    instance3.contactFromUuid(4).write("test");
+  }, 1000);
 }, 100);
 /*instance4 = new mesh.Main(
   {
