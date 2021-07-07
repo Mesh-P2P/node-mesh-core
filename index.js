@@ -5,11 +5,6 @@ const crypto = require("crypto");
 const stream = require("stream");
 const isIPv4 = /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/;
 
-/* TODO:
-    - Stream inteface
-    - Tunneling
- */
-
 class Main {
   constructor(
     self,
@@ -65,50 +60,66 @@ class Main {
     );
     this.contacts.splice(this.contacts.indexOf(this.contactFromUuid(uuid)), 1);
   }
-  requestContact(uuid) {
-    console.log(uuid);
+  async requestContact(uuid, key) {
     let promises = [];
-    for (contact of this.contacts) {
-      promises.push(
-        contact.send(
-          {
-            to: uuid,
-            from: this.uuid,
-            pub: this.pub
-              .export({ format: "der", type: "pkcs1" })
-              .toString("base64")
-          },
-          "contact_req"
-        )
-      );
-    }
-    Promise.allSettled(promises).then(results => {
-      results = results.filter(res => res.status == "fulfilled");
-      let responses = [...new Set(results.map(res => res.value.body))];
-      let awnsers = [];
-      if (responses.length == 0) console.log("No responses to contact_req");
-      for (res of responses) {
-        try {
-          res = JSON.parse(res.body);
-          for (awnser of res.body) {
-            awnsers.push(decrypt(this.priv, awnser));
-          }
-        } catch {}
+    console.log(
+      this.pub.export({ format: "der", type: "pkcs1" }).toString("base64")
+    );
+    debugger;
+    sym_encrypt(
+      key,
+      JSON.stringify({
+        pub: this.pub
+          .export({ format: "der", type: "pkcs1" })
+          .toString("base64"),
+        from: this.uuid
+      })
+    ).then(encrypted => {
+      for (let contact of this.contacts) {
+        promises.push(
+          contact.send(
+            {
+              to: uuid,
+              hops: 0,
+              encrypted: encrypted
+            },
+            "contact_req"
+          )
+        );
       }
-      if (this.contactFromUuid(uuid) == undefined) {
-        this.callback("contact_req_answers", awnsers).then(res => {
-          contact = this.addContact({
-            uuid: uuid,
-            pub: crypto.createPublicKey({
-              key: res.pub,
-              format: "der",
-              type: "pkcs1",
-              encoding: "base64"
-            })
-          });
-          contact.sendIP();
-        });
-      }
+      Promise.allSettled(promises).then(results => {
+        results = results.filter(res => res.status == "fulfilled");
+        let responses = [...new Set(results.map(res => res.value.body))];
+        if (responses.length == 0) console.log("No responses to contact_req");
+        for (let res of responses) {
+          try {
+            for (let awnser of res) {
+              sym_decrypt(key, awnser).then(message => {
+                console.log(
+                  this.pub
+                    .export({
+                      format: "der",
+                      type: "pkcs1"
+                    })
+                    .toString("base64")
+                );
+                if (this.contactFromUuid(uuid) == undefined) {
+                  let contact = this.addContact({
+                    uuid: uuid,
+                    pub: crypto.createPublicKey({
+                      key: message,
+                      format: "der",
+                      type: "pkcs1",
+                      encoding: "base64"
+                    })
+                  });
+                  contact.sendIP();
+                }
+              });
+            }
+          } catch {}
+        }
+      });
     });
   }
 
@@ -173,8 +184,8 @@ class Main {
             switch (data.type) {
               case "IP":
                 {
+                  data.body.hops++;
                   if (data.body.to == this.uuid) {
-                    data.body.encrypted = JSON.parse(data.body.encrypted);
                     let message = JSON.parse(
                       decrypt(this.priv, data.body.encrypted.message)
                     );
@@ -192,19 +203,28 @@ class Main {
                           contact_to.localPort = this.servers[0].port;
                         }
                         contact_to.punchHole(message);
-
+                        console.log(
+                          sign(
+                            this.priv,
+                            encrypt(
+                              contact_to.pub,
+                              JSON.stringify({
+                                ip: this.ip,
+                                port: contact_to.localPort
+                              })
+                            )
+                          )
+                        );
                         contact.respond(
                           data.id,
-                          JSON.stringify(
-                            sign(
-                              this.priv,
-                              encrypt(
-                                contact.pub,
-                                JSON.stringify({
-                                  ip: this.ip,
-                                  port: contact_to.localPort
-                                })
-                              )
+                          sign(
+                            this.priv,
+                            encrypt(
+                              contact_to.pub,
+                              JSON.stringify({
+                                ip: this.ip,
+                                port: contact_to.localPort
+                              })
                             )
                           )
                         );
@@ -230,14 +250,13 @@ class Main {
                       let responses = [];
                       results.forEach(result => {
                         if (result.status == "fulfilled")
-                          responses.push(result.value);
+                          responses.push(result.value.body);
                       });
                       responses = [...new Set(responses)];
                       if (responses.length == 1) responses = responses[0];
                       contact.respond(data.id, responses);
                     });
                   } else if (data.body.hops < 20) {
-                    data.body.hops++;
                     let promises = [];
                     for (let contact_ of this.contacts) {
                       if (contact_.uuid != data.from)
@@ -247,7 +266,7 @@ class Main {
                       let responses = [];
                       results.forEach(result => {
                         if (result.status == "fulfilled")
-                          responses.push(result.value);
+                          responses.push(result.value.body);
                       });
                       responses = [...new Set(responses)];
                       if (responses.length == 1) responses = responses[0];
@@ -266,6 +285,7 @@ class Main {
                 break;
               case "referral":
                 {
+                  data.body.hops++;
                   if (this.referralFromUuid(data.body.referent) === undefined)
                     this.referrals.push({
                       referent: data.body.referent,
@@ -280,7 +300,6 @@ class Main {
                       referral.referees.push(data.from);
                   }
                   if (data.body.hops < 20) {
-                    data.body.hops++;
                     if (referral.referees.indexOf(data.from) != -1)
                       for (contact_ of this.contacts) {
                         if (contact_.uuid != data.from)
@@ -292,47 +311,54 @@ class Main {
                 break;
               case "contact_req":
                 {
+                  data.body.hops++;
                   if (data.body.to == this.uuid) {
-                    data.body = JSON.parse(decrypt(this.priv, data.body));
-                    this.callback("contact_req", data.body).then(res => {
-                      contact = this.addContact({
-                        uuid: data.body.from,
-                        pub: crypto.createPublicKey({
-                          key: data.body.pub,
-                          format: "der",
-                          type: "pkcs1",
-                          encoding: "base64"
-                        })
-                      });
-                      contact.respond(
-                        data.id,
-                        JSON.stringify(
-                          sign(
-                            this.priv,
-                            encrypt(
-                              contact.pub,
-                              JSON.stringify({
-                                pub: this.pub.export({
-                                  format: "der",
-                                  type: "pkcs1"
-                                }),
-                                phrase: res
-                              })
-                            )
-                          )
-                        )
-                      );
-                    });
+                    this.callback("contact_req", data.body.encrypted).then(
+                      res => {
+                        res.body = JSON.parse(res.body);
+                        console.log(res.body.pub);
+                        this.addContact({
+                          uuid: res.body.from,
+                          pub: crypto.createPublicKey({
+                            key: res.body.pub,
+                            format: "der",
+                            type: "pkcs1",
+                            encoding: "base64"
+                          })
+                        });
+                        console.log(
+                          this.pub
+                            .export({
+                              format: "der",
+                              type: "pkcs1"
+                            })
+                            .toString("base64")
+                        );
+                        sym_encrypt(
+                          res.key,
+                          this.pub
+                            .export({
+                              format: "der",
+                              type: "pkcs1"
+                            })
+                            .toString("base64")
+                        ).then(encrypted =>
+                          contact.respond(data.id, encrypted)
+                        );
+                      }
+                    );
                   } else if (this.contactFromUuid(data.body.to) != undefined) {
                     this.contactFromUuid(data.body.to)
                       .send(data.body, "contact_req")
                       .then(res => {
+                        console.log(res);
                         contact.respond(data.id, res.body);
                       })
                       .catch(() => {
                         contact.respond(data.id);
                       });
                   } else if (this.referralFromUuid(data.body.to) != undefined) {
+                    console.log("req");
                     let promises;
                     for (let contact_ of this.referralFromUuid(data.body.to)) {
                       promises += contact_.send(data.body, "contact_req");
@@ -341,31 +367,27 @@ class Main {
                       let responses = [];
                       results.forEach(result => {
                         if (result.status == "fulfilled")
-                          responses.push(result.value);
+                          responses.push(result.value.body);
                       });
                       responses = [...new Set(responses)];
-                      if (responses.length == 1) responses = responses[0];
                       contact.respond(data.id, responses);
                     });
                   } else if (data.body.hops < 20) {
-                    data.body.hops++;
-                    let promises;
+                    let promises = [];
                     for (let contact_ of this.contacts) {
                       if (contact_.uuid != data.from)
-                        promises += contact_.send(data.body, "contact_req");
+                        promises.push(contact_.send(data.body, "contact_req"));
                     }
                     Promise.allSettled(promises).then(results => {
                       let responses = [];
                       results.forEach(result => {
                         if (result.status == "fulfilled")
-                          responses.push(result.value);
+                          responses.push(result.value.body);
                       });
                       responses = [...new Set(responses)];
-                      if (responses.length == 1) responses = responses[0];
                       contact.respond(data.id, responses);
                     });
                   }
-                  if (this.contacts.length == 1) contact.respond(data.id);
                 }
                 break;
               default: {
@@ -389,6 +411,7 @@ class Contact extends stream.Duplex {
     this.pub = self.pub;
     this.uuid = self.uuid;
     this.try = 0;
+    this.connected = false;
   }
   _write(chunk) {
     this.send(chunk.toString("base64"), "message");
@@ -404,8 +427,8 @@ class Contact extends stream.Duplex {
         type: type,
         body: message,
         id: id,
-        ip: this.remoteIP,
-        port: this.remotePort
+        ip: this.socket.remoteAddress,
+        port: this.socket.remotePort
       });
       this.socket.write(
         JSON.stringify(
@@ -416,8 +439,8 @@ class Contact extends stream.Duplex {
               type: type,
               body: message,
               id: id,
-              ip: this.remoteIP,
-              port: this.remotePort
+              ip: this.socket.remoteAddress,
+              port: this.socket.remotePort
             })
           )
         )
@@ -429,6 +452,7 @@ class Contact extends stream.Duplex {
       });
       this.socket.on("error", err => {
         debugger;
+        responded = true;
         this.connected = false;
         this.parent.events_.removeAllListeners("id-" + id);
         console.log("send from " + this.parent.uuid + err);
@@ -454,8 +478,8 @@ class Contact extends stream.Duplex {
         from: this.parent.uuid,
         body: message,
         res: id,
-        ip: this.remoteIP,
-        port: this.remotePort
+        ip: this.socket.remoteAddress,
+        port: this.socket.remotePort
       });
       this.socket.write(
         JSON.stringify(
@@ -465,8 +489,8 @@ class Contact extends stream.Duplex {
               from: this.parent.uuid,
               body: message,
               res: id,
-              ip: this.remoteIP,
-              port: this.remotePort
+              ip: this.socket.remoteAddress,
+              port: this.socket.remotePort
             })
           )
         )
@@ -576,17 +600,15 @@ class Contact extends stream.Duplex {
             {
               to: this.uuid,
               hops: 0,
-              encrypted: JSON.stringify(
-                sign(
-                  this.parent.priv,
-                  encrypt(
-                    this.pub,
-                    JSON.stringify({
-                      from: this.parent.uuid,
-                      IP: this.parent.ip,
-                      port: this.localPort
-                    })
-                  )
+              encrypted: sign(
+                this.parent.priv,
+                encrypt(
+                  this.pub,
+                  JSON.stringify({
+                    from: this.parent.uuid,
+                    IP: this.parent.ip,
+                    port: this.localPort
+                  })
                 )
               )
             },
@@ -601,20 +623,19 @@ class Contact extends stream.Duplex {
       let awnsers = [];
       for (let res of responses) {
         try {
-          let awnser = JSON.parse(res);
-          console.log(awnser);
-          awnser.message = decrypt(this.parent.priv, awnser.message);
-          console.log(awnser);
-          if (typeof awnser !== "array") awnser = [awnser];
-          awnsers.push(awnser);
+          if (verify(this.pub, res)) {
+            res.message = decrypt(this.parent.priv, res.message).toString();
+            awnsers.push(res);
+          }
         } catch {
           console.log("Error");
         }
       }
       let res = [...new Set(awnsers)];
-      for (awnser of res) {
-        if (res != "" && verify(contact.pub, awnser))
-          this.punchHole(JSON.parse(awnser.message), 10);
+      for (let awnser of res) {
+        if (res != "") {
+          this.punchHole(JSON.parse(awnser.message), 100);
+        }
       }
     });
   }
@@ -622,7 +643,7 @@ class Contact extends stream.Duplex {
     let uuid = this.uuid;
     for (let contact of this.parent.contacts) {
       if (contact.connected)
-        this.send(
+        contact.send(
           {
             referent: uuid,
             hops: 1,
@@ -633,9 +654,13 @@ class Contact extends stream.Duplex {
     }
   }
   punchHole(data, timeout = 0) {
+    console.log(data);
     let port = this.localPort + 1;
     port--;
-    if (!this.connected) {
+    if (
+      !this.parent.servers.find(server => server.port == port) &&
+      !this.connected
+    ) {
       setTimeout(() => {
         console.log("punch on " + port);
         let socket = net.createConnection({
@@ -657,61 +682,90 @@ class Contact extends stream.Duplex {
         });
         socket.on("close", err => {
           console.log("server: " + this.parent.uuid);
-          debugger;
-          if (
-            !this.parent.servers.find(server => server.port == this.localPort)
-          ) {
-            let server = net.createServer(socket => {
-              socket.on("ready", () => {
-                this.connected = true;
-                this.socket = socket;
-              });
-              socket.on("data", data => {
-                if (!this.parent.servers.find(server_ => server == server_))
-                  this.parent.servers.push(server);
 
-                this.parent.handle_in(socket, data);
-              });
-              socket.on("error", err => {
-                console.log("holepunch error: " + err);
-                this.connected = false;
-                this.parent.servers.splice(
-                  this.parent.servers.indexOf(
-                    this.parent.servers.find(server_ => server == server_)
-                  ),
-                  1
-                );
-              });
+          let server = net.createServer(socket => {
+            socket.on("ready", () => {
+              this.connected = true;
+              this.socket = socket;
             });
-            server.listen(port);
-            this.parent.servers.push({
-              server: server,
-              port: port
+            socket.on("data", data => {
+              if (!this.parent.servers.find(server_ => server == server_))
+                this.parent.servers.push(server);
+
+              this.parent.handle_in(socket, data);
             });
-            server.on("error", err => {
-              console.log(err);
+            socket.on("error", err => {
+              this.connected = false;
+              this.parent.servers.splice(
+                this.parent.servers.indexOf(
+                  this.parent.servers.find(server_ => server == server_)
+                ),
+                1
+              );
             });
-          }
+          });
+          server.listen(port);
+          this.parent.servers.push({
+            server: server,
+            port: port
+          });
+          server.on("error", err => {
+            console.log(err);
+          });
         });
       }, timeout);
-    }
+    } else console.log("already listening on port " + port);
   }
 }
 
-function sign(key, message) {
+function sign(key, message, algorithm = "SHA256") {
   if (typeof message === "object") message = JSON.stringify(message);
-  let sign = crypto.createSign("SHA256");
+  let sign = crypto.createSign(algorithm);
   sign.write(message);
   sign.end();
   sig = sign.sign(key, "base64");
   return { sig, message };
 }
 
-function verify(key, { sig, message }) {
-  let verify = crypto.createVerify("SHA256");
+function verify(key, { sig, message }, algorithm = "SHA256") {
+  let verify = crypto.createVerify(algorithm);
   verify.write(message);
   verify.end();
   return verify.verify(key, sig, "base64");
+}
+
+function sym_encrypt(key, message) {
+  return new Promise((resolve, reject) => {
+    const iv = crypto.randomFillSync(new Uint8Array(16));
+    const cipher = crypto.createCipheriv("AES256", key, iv);
+
+    let encrypted = "";
+    cipher.setEncoding("base64");
+    cipher.on("data", chunk => (encrypted += chunk));
+    cipher.on("end", () =>
+      resolve({ message: encrypted, iv: Buffer.from(iv).toString("base64") })
+    );
+
+    cipher.write(message);
+    cipher.end();
+  });
+}
+
+function sym_decrypt(key, { iv, message }) {
+  return new Promise((resolve, reject) => {
+    iv = Buffer.from(iv, "base64");
+    const decipher = crypto.createDecipheriv("AES256", key, iv);
+
+    let decrypted = "";
+
+    decipher.on("data", chunk => (decrypted += chunk));
+    decipher.on("end", () => {
+      resolve(decrypted);
+    });
+
+    decipher.write(message, "base64");
+    decipher.end();
+  });
 }
 
 function encrypt(key, message) {
@@ -739,7 +793,6 @@ function decrypt(key, message) {
     },
     Buffer.from(message, "base64")
   );
-  console.log(message);
   return message;
 }
 
