@@ -5,6 +5,8 @@ const crypto = require("crypto");
 const stream = require("stream");
 const isIPv4 = /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/;
 
+// TODO: message id (IP,contact_req); cleanup/comments; encryption
+
 class Main {
   constructor(
     self,
