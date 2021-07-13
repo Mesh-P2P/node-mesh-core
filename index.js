@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const stream = require("stream");
 const isIPv4 = /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/;
 
-// TODO: message id (IP,contact_req); cleanup/comments; encryption
+// TODO: encryption
 
 /**
  * The Interface
@@ -25,6 +25,7 @@ const isIPv4 = /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/
  * @param {boolean} server - is server (optional)
  */
 class Main {
+  current_requests = [];
   constructor(
     self,
     contacts_ = [],
@@ -99,6 +100,7 @@ class Main {
    */
   async requestContact(uuid, key) {
     let promises = [];
+    let id = Math.floor(Math.random() * 1000);
     console.log(
       this.pub.export({ format: "der", type: "pkcs1" }).toString("base64")
     );
@@ -118,7 +120,8 @@ class Main {
             {
               to: uuid,
               hops: 0,
-              encrypted: encrypted
+              encrypted: encrypted,
+              id
             },
             "contact_req"
           )
@@ -231,96 +234,141 @@ class Main {
             switch (data.type) {
               case "IP":
                 {
-                  data.body.hops++;
-                  if (data.body.to == this.uuid) {
-                    let message = JSON.parse(
-                      decrypt(this.priv, data.body.encrypted.message)
-                    );
-                    if (
-                      verify(
-                        this.contactFromUuid(message.from).pub,
-                        data.body.encrypted
-                      )
-                    ) {
-                      //holepunching
-                      let contact_to = this.contactFromUuid(message.from);
-                      if (!contact_to.connected) {
-                        contact_to.localPort = await getPort();
-                        if (this.servers.length > 0) {
-                          contact_to.localPort = this.servers[0].port;
+                  if (this.current_requests.indexOf(data.id) === -1) {
+                    this.current_requests.push(data.body.id);
+                    data.body.hops++;
+                    if (data.body.to == this.uuid) {
+                      let message = JSON.parse(
+                        decrypt(this.priv, data.body.encrypted.message)
+                      );
+                      if (
+                        verify(
+                          this.contactFromUuid(message.from).pub,
+                          data.body.encrypted
+                        )
+                      ) {
+                        //holepunching
+                        let contact_to = this.contactFromUuid(message.from);
+                        if (!contact_to.connected) {
+                          contact_to.localPort = await getPort();
+                          if (this.servers.length > 0) {
+                            contact_to.localPort = this.servers[0].port;
+                          }
+                          contact_to.punchHole(message);
+                          console.log(
+                            sign(
+                              this.priv,
+                              encrypt(
+                                contact_to.pub,
+                                JSON.stringify({
+                                  ip: this.ip,
+                                  port: contact_to.localPort
+                                })
+                              )
+                            )
+                          );
+                          contact.respond(
+                            data.id,
+                            sign(
+                              this.priv,
+                              encrypt(
+                                contact_to.pub,
+                                JSON.stringify({
+                                  ip: this.ip,
+                                  port: contact_to.localPort
+                                })
+                              )
+                            )
+                          );
+                          this.current_requests.splice(
+                            this.current_requests.indexOf(data.body.id),
+                            1
+                          );
+                        } else {
+                          this.current_requests.splice(
+                            this.current_requests.indexOf(data.body.id),
+                            1
+                          );
+                          contact.respond(data.id);
                         }
-                        contact_to.punchHole(message);
-                        console.log(
-                          sign(
-                            this.priv,
-                            encrypt(
-                              contact_to.pub,
-                              JSON.stringify({
-                                ip: this.ip,
-                                port: contact_to.localPort
-                              })
-                            )
-                          )
+                      } else {
+                        this.current_requests.splice(
+                          this.current_requests.indexOf(data.body.id),
+                          1
                         );
-                        contact.respond(
-                          data.id,
-                          sign(
-                            this.priv,
-                            encrypt(
-                              contact_to.pub,
-                              JSON.stringify({
-                                ip: this.ip,
-                                port: contact_to.localPort
-                              })
-                            )
-                          )
+                        contact.respond(data.id);
+                      }
+                    } else if (
+                      this.contactFromUuid(data.body.to) != undefined
+                    ) {
+                      this.contactFromUuid(data.body.to)
+                        .send(data.body, "IP")
+                        .then(res => {
+                          this.current_requests.splice(
+                            this.current_requests.indexOf(data.body.id),
+                            1
+                          );
+                          contact.respond(data.id, res.body);
+                        })
+                        .catch(() => {
+                          this.current_requests.splice(
+                            this.current_requests.indexOf(data.body.id),
+                            1
+                          );
+                          contact.respond(data.id);
+                        });
+                    } else if (
+                      this.referralFromUuid(data.body.to) != undefined
+                    ) {
+                      let promises;
+                      for (let contact_ of this.referralFromUuid(
+                        data.body.to
+                      )) {
+                        promises += contact_.send(data.body, "IP");
+                      }
+                      Promise.allSettled(promises).then(results => {
+                        let responses = [];
+                        results.forEach(result => {
+                          if (result.status == "fulfilled")
+                            responses.push(result.value.body);
+                        });
+                        responses = [...new Set(responses)];
+                        if (responses.length == 1) responses = responses[0];
+                        this.current_requests.splice(
+                          this.current_requests.indexOf(data.body.id),
+                          1
                         );
-                      } else contact.respond(data.id);
-                    } else {
+                        contact.respond(data.id, responses);
+                      });
+                    } else if (data.body.hops < 20) {
+                      let promises = [];
+                      for (let contact_ of this.contacts) {
+                        if (contact_.uuid != data.from)
+                          promises.push(contact_.send(data.body, "IP"));
+                      }
+                      Promise.allSettled(promises).then(results => {
+                        let responses = [];
+                        results.forEach(result => {
+                          if (result.status == "fulfilled")
+                            responses.push(result.value.body);
+                        });
+                        responses = [...new Set(responses)];
+                        if (responses.length == 1) responses = responses[0];
+                        this.current_requests.splice(
+                          this.current_requests.indexOf(data.body.id),
+                          1
+                        );
+                        contact.respond(data.id, responses);
+                      });
+                    }
+                    if (this.contacts.length == 1) {
+                      this.current_requests.splice(
+                        this.current_requests.indexOf(data.body.id),
+                        1
+                      );
                       contact.respond(data.id);
                     }
-                  } else if (this.contactFromUuid(data.body.to) != undefined) {
-                    this.contactFromUuid(data.body.to)
-                      .send(data.body, "IP")
-                      .then(res => {
-                        contact.respond(data.id, res.body);
-                      })
-                      .catch(() => {
-                        contact.respond(data.id);
-                      });
-                  } else if (this.referralFromUuid(data.body.to) != undefined) {
-                    let promises;
-                    for (let contact_ of this.referralFromUuid(data.body.to)) {
-                      promises += contact_.send(data.body, "IP");
-                    }
-                    Promise.allSettled(promises).then(results => {
-                      let responses = [];
-                      results.forEach(result => {
-                        if (result.status == "fulfilled")
-                          responses.push(result.value.body);
-                      });
-                      responses = [...new Set(responses)];
-                      if (responses.length == 1) responses = responses[0];
-                      contact.respond(data.id, responses);
-                    });
-                  } else if (data.body.hops < 20) {
-                    let promises = [];
-                    for (let contact_ of this.contacts) {
-                      if (contact_.uuid != data.from)
-                        promises.push(contact_.send(data.body, "IP"));
-                    }
-                    Promise.allSettled(promises).then(results => {
-                      let responses = [];
-                      results.forEach(result => {
-                        if (result.status == "fulfilled")
-                          responses.push(result.value.body);
-                      });
-                      responses = [...new Set(responses)];
-                      if (responses.length == 1) responses = responses[0];
-                      contact.respond(data.id, responses);
-                    });
-                  }
-                  if (this.contacts.length == 1) contact.respond(data.id);
+                  } else contact.respond(data.id);
                 }
                 break;
               case "message":
@@ -353,6 +401,10 @@ class Main {
                           contact_.send(data.body, "IP");
                       }
                   }
+                  this.current_requests.splice(
+                    this.current_requests.indexOf(data.body.id),
+                    1
+                  );
                   contact.respond(data.id);
                 }
                 break;
@@ -389,9 +441,13 @@ class Main {
                               type: "pkcs1"
                             })
                             .toString("base64")
-                        ).then(encrypted =>
-                          contact.respond(data.id, encrypted)
-                        );
+                        ).then(encrypted => {
+                          this.current_requests.splice(
+                            this.current_requests.indexOf(data.body.id),
+                            1
+                          );
+                          contact.respond(data.id, encrypted);
+                        });
                       }
                     );
                   } else if (this.contactFromUuid(data.body.to) != undefined) {
@@ -399,9 +455,17 @@ class Main {
                       .send(data.body, "contact_req")
                       .then(res => {
                         console.log(res);
+                        this.current_requests.splice(
+                          this.current_requests.indexOf(data.body.id),
+                          1
+                        );
                         contact.respond(data.id, res.body);
                       })
                       .catch(() => {
+                        this.current_requests.splice(
+                          this.current_requests.indexOf(data.body.id),
+                          1
+                        );
                         contact.respond(data.id);
                       });
                   } else if (this.referralFromUuid(data.body.to) != undefined) {
@@ -432,6 +496,10 @@ class Main {
                           responses.push(result.value.body);
                       });
                       responses = [...new Set(responses)];
+                      this.current_requests.splice(
+                        this.current_requests.indexOf(data.body.id),
+                        1
+                      );
                       contact.respond(data.id, responses);
                     });
                   }
@@ -654,6 +722,7 @@ class Contact extends stream.Duplex {
   async sendIP() {
     console.log("sendIP for " + this.uuid + " from " + this.parent.uuid);
     this.localPort = await getPort();
+    let id = Math.floor(Math.random() * 1000);
     console.log(this.localPort);
     if (this.parent.servers.length > 0) {
       this.localPort = this.parent.servers[0].port;
@@ -682,7 +751,8 @@ class Contact extends stream.Duplex {
                     port: this.localPort
                   })
                 )
-              )
+              ),
+              id
             },
             "IP"
           )
@@ -717,13 +787,15 @@ class Contact extends stream.Duplex {
    */
   sendReferrals(rm = false) {
     let uuid = this.uuid;
+    let id = Math.floor(Math.random() * 1000);
     for (let contact of this.parent.contacts) {
       if (contact.connected)
         contact.send(
           {
             referent: uuid,
             hops: 1,
-            rm: rm
+            rm: rm,
+            id
           },
           "referral"
         );
