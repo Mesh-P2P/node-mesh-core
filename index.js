@@ -7,6 +7,23 @@ const isIPv4 = /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/
 
 // TODO: message id (IP,contact_req); cleanup/comments; encryption
 
+/**
+ * The Interface
+ * @param {Object} self - this Peer
+ * @param {string} self.uuid - its uuid
+ * @param {PublicKey} self.pub - its public key (RSA)
+ * @param {PrivateKey} self.priv - its private key (RSA)
+ * @param {string} self.ip
+ * @param {number} self.port
+ * @param {Object[]} contacts_ - Contacts
+ * @param {string} contacts_.uuid - its uuid
+ * @param {PublicKey} contacts_.pub - its public key (RSA)
+ * @param {string} contacts_.remoteIP - its IP address
+ * @param {number} contacts_.remotePort - its port
+ * @param {Object[]} referrals - Referrals
+ * @param {Function} callback - callback promise that handles contact requests ("contact_req", "contact_req_answers")
+ * @param {boolean} server - is server (optional)
+ */
 class Main {
   constructor(
     self,
@@ -50,11 +67,24 @@ class Main {
 
     console.log(this.uuid + " created");
   }
+  /**
+   * adds a contact to contacts
+   * @param {Object} contact_ - Contact information
+   * @param {string} contact_.uuid - its uuid
+   * @param {PublicKey} contact_.pub - its public key (RSA)
+   * @param {string} contact_.remoteIP - its IP address
+   * @param {number} contact_.remotePort - its port
+   * @returns {Object} the Contact
+   */
   addContact(contact_) {
     let contact = new Contact(this, contact_);
     this.contacts.push(contact);
     return contact;
   }
+  /**
+   * removes a contact from contacts
+   * @param {string} uuid
+   */
   removeContact(uuid) {
     this.contacts_.splice(
       this.contacts_.indexOf(this.contactFromUuid(uuid)),
@@ -62,6 +92,11 @@ class Main {
     );
     this.contacts.splice(this.contacts.indexOf(this.contactFromUuid(uuid)), 1);
   }
+  /**
+   * Handles addition of a contact
+   * @param {string} uuid
+   * @param {SecretKey} key - A secret key
+   */
   async requestContact(uuid, key) {
     let promises = [];
     console.log(
@@ -124,24 +159,34 @@ class Main {
       });
     });
   }
-
-  sendMessage(uuid, message) {
-    this.contactFromUuid(uuid).send(message, "message");
-  }
-
   on(type, callback) {
     return this.events.on(type, callback);
   }
+  /**
+   * get contact from its uuid
+   * @param {string} uuid
+   * @return {Contact} Contact
+   */
   contactFromUuid(uuid) {
     return this.contacts.find(contact => {
       return contact.uuid == uuid;
     });
   }
+  /**
+   * get referral from its uuid
+   * @param {string} uuid
+   * @return {Object} Referral
+   */
   referralFromUuid(uuid) {
     return this.referrals.find(referral => {
       return referral.referent == uuid;
     });
   }
+  /**
+   * get contact from its IP
+   * @param {string} IP
+   * @returns {Contact} Contact
+   */
   contactFromIp(ip) {
     return this.contacts.find(contact => {
       return contact.remoteIP === ip;
@@ -403,7 +448,15 @@ class Main {
   }
 }
 exports.Main = Main;
-
+/**
+ * a Contact
+ * @param {Object} parent - the parent Class
+ * @param {Object} self - information about itself
+ * @param {string} self.uuid - its uuid
+ * @param {PublicKey} self.pub - its public key (RSA)
+ * @param {string} self.remoteIP - its IP address
+ * @param {number} self.remotePort - its port
+ */
 class Contact extends stream.Duplex {
   constructor(parent, self, options) {
     super(options);
@@ -419,6 +472,12 @@ class Contact extends stream.Duplex {
     this.send(chunk.toString("base64"), "message");
   }
   _read() {}
+  /**
+   * send a message to this Contact
+   * @param {any} message - the message to be sent
+   * @param {string} type - the type of the message
+   * @returns {Promise} a Promise that resolves with the response
+   */
   send(message, type) {
     return new Promise((resolve, reject) => {
       //console.log("write");
@@ -472,6 +531,11 @@ class Contact extends stream.Duplex {
       }, 60000);
     });
   }
+  /**
+   * Responds to a message
+   * @param {number} id - the message id
+   * @param {any} message - what to respond with
+   */
   respond(id, message = "") {
     //console.log("respond");
     return new Promise((resolve, reject) => {
@@ -509,6 +573,9 @@ class Contact extends stream.Duplex {
       });
     });
   }
+  /**
+   * connect to this contact
+   */
   connect() {
     return new Promise((resolve, reject) => {
       //console.log("createConnection");
@@ -581,6 +648,9 @@ class Contact extends stream.Duplex {
       }
     });
   }
+  /**
+   * send IP messages to all contacts for this contact
+   */
   async sendIP() {
     console.log("sendIP for " + this.uuid + " from " + this.parent.uuid);
     this.localPort = await getPort();
@@ -641,6 +711,10 @@ class Contact extends stream.Duplex {
       }
     });
   }
+  /**
+   * send referral message about this contact to all contacts
+   * @param {boolean} rm - send as Remove referral message
+   */
   sendReferrals(rm = false) {
     let uuid = this.uuid;
     for (let contact of this.parent.contacts) {
@@ -655,6 +729,13 @@ class Contact extends stream.Duplex {
         );
     }
   }
+  /**
+   * do holepunching with this contact
+   * @param {Object} data
+   * @param {string} data.ip - this contact's IP address
+   * @param {number} data.port - this contact's port
+   * @param {number} timeout
+   */
   punchHole(data, timeout = 0) {
     console.log(data);
     let port = this.localPort + 1;
@@ -719,7 +800,13 @@ class Contact extends stream.Duplex {
     } else console.log("already listening on port " + port);
   }
 }
-
+/**
+ * sing a message
+ * @param {PrivateKey} key - the private key
+ * @param {any} message - the message to sing
+ * @param {string} algorithm - the algorithm to use
+ * @returns {Object} signed message with signature (with sig and message)
+ */
 function sign(key, message, algorithm = "SHA256") {
   if (typeof message === "object") message = JSON.stringify(message);
   let sign = crypto.createSign(algorithm);
@@ -728,14 +815,27 @@ function sign(key, message, algorithm = "SHA256") {
   sig = sign.sign(key, "base64");
   return { sig, message };
 }
-
+/**
+ * verify a signed message
+ * @param {PublicKey} key - the public key
+ * @param {Object} signed_message
+ * @param {String} signed_message.sig - the signature
+ * @param {String} signed_message.message - the message
+ * @param {String} algorithm - the algorithm to use
+ * @returns {boolean} - true if the signature is valid
+ */
 function verify(key, { sig, message }, algorithm = "SHA256") {
   let verify = crypto.createVerify(algorithm);
   verify.write(message);
   verify.end();
   return verify.verify(key, sig, "base64");
 }
-
+/**
+ * encrypt with symmetric key
+ * @param {SecretKey} key - the symmetric key
+ * @param {string} message
+ * @returns {Object} returns {message, iv}
+ */
 function sym_encrypt(key, message) {
   return new Promise((resolve, reject) => {
     const iv = crypto.randomFillSync(new Uint8Array(16));
@@ -752,7 +852,14 @@ function sym_encrypt(key, message) {
     cipher.end();
   });
 }
-
+/**
+ * decrypt with symmetric key
+ * @param {SecretKey} key - the symmetric key
+ * @param {Object} encrypted_message - the encrypted message with iv
+ * @param {string} encrypted_message.iv
+ * @param {string} encrypted_message.message
+ * @returns {Promise} - Promise that resolves with the decrypted message
+ */
 function sym_decrypt(key, { iv, message }) {
   return new Promise((resolve, reject) => {
     iv = Buffer.from(iv, "base64");
@@ -769,7 +876,12 @@ function sym_decrypt(key, { iv, message }) {
     decipher.end();
   });
 }
-
+/**
+ * RSA encrypt
+ * @param {PrivateKey} key - the private key (RSA)
+ * @param {string} message
+ * @returns {string} encrypted message
+ */
 function encrypt(key, message) {
   //return message;
   let result = crypto
@@ -784,7 +896,12 @@ function encrypt(key, message) {
     .toString("base64");
   return result;
 }
-
+/**
+ * RSA decrypt
+ * @param {PublicKey} key - the public key (RSA)
+ * @param {string} message - encrypted message
+ * @return {string} decrypted message
+ */
 function decrypt(key, message) {
   //return message;
   message = crypto.privateDecrypt(
@@ -797,7 +914,11 @@ function decrypt(key, message) {
   );
   return message;
 }
-
+/**
+ * split a string into json strings
+ * @param {string} data - the string to be split
+ * @returns {string[]} json strings
+ */
 function splitMessages(data) {
   let chars = data.split("");
   let brackets = 0;
