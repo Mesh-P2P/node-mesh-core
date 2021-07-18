@@ -191,7 +191,6 @@ instance4 = new mesh.Main(
   },
   true
 );
-
 function sym_decrypt(key, { iv, message }) {
   return new Promise((resolve, reject) => {
     iv = Uint8Array.from(Buffer.from(iv, "base64"));

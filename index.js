@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const stream = require("stream");
 const isIPv4 = /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/;
 
-// TODO: encryption
+// TODO: **encryption/handshake**; compact
 
 /**
  * The Interface
@@ -133,29 +133,31 @@ class Main {
         if (responses.length == 0) console.log("No responses to contact_req");
         for (let res of responses) {
           try {
+            if (typeof res !== "array") res = [res];
             for (let awnser of res) {
-              sym_decrypt(key, awnser).then(message => {
-                console.log(
-                  this.pub
-                    .export({
-                      format: "der",
-                      type: "pkcs1"
-                    })
-                    .toString("base64")
-                );
-                if (this.contactFromUuid(uuid) == undefined) {
-                  let contact = this.addContact({
-                    uuid: uuid,
-                    pub: crypto.createPublicKey({
-                      key: message,
-                      format: "der",
-                      type: "pkcs1",
-                      encoding: "base64"
-                    })
-                  });
-                  contact.sendIP();
-                }
-              });
+              if (awnser != "")
+                sym_decrypt(key, awnser).then(message => {
+                  console.log(
+                    this.pub
+                      .export({
+                        format: "der",
+                        type: "pkcs1"
+                      })
+                      .toString("base64")
+                  );
+                  if (this.contactFromUuid(uuid) == undefined) {
+                    let contact = this.addContact({
+                      uuid: uuid,
+                      pub: crypto.createPublicKey({
+                        key: message,
+                        format: "der",
+                        type: "pkcs1",
+                        encoding: "base64"
+                      })
+                    });
+                    contact.sendIP();
+                  }
+                });
             }
           } catch {}
         }
@@ -234,7 +236,7 @@ class Main {
             switch (data.type) {
               case "IP":
                 {
-                  if (this.current_requests.indexOf(data.id) === -1) {
+                  if (this.current_requests.indexOf(data.body.id) === -1) {
                     this.current_requests.push(data.body.id);
                     data.body.hops++;
                     if (data.body.to == this.uuid) {
@@ -280,22 +282,28 @@ class Main {
                               )
                             )
                           );
-                          this.current_requests.splice(
-                            this.current_requests.indexOf(data.body.id),
-                            1
-                          );
+                          setTimeout(() => {
+                            this.current_requests.splice(
+                              this.current_requests.indexOf(data.body.id),
+                              1
+                            );
+                          }, 20);
                         } else {
-                          this.current_requests.splice(
-                            this.current_requests.indexOf(data.body.id),
-                            1
-                          );
+                          setTimeout(() => {
+                            this.current_requests.splice(
+                              this.current_requests.indexOf(data.body.id),
+                              1
+                            );
+                          }, 20);
                           contact.respond(data.id);
                         }
                       } else {
-                        this.current_requests.splice(
-                          this.current_requests.indexOf(data.body.id),
-                          1
-                        );
+                        setTimeout(() => {
+                          this.current_requests.splice(
+                            this.current_requests.indexOf(data.body.id),
+                            1
+                          );
+                        }, 20);
                         contact.respond(data.id);
                       }
                     } else if (
@@ -311,10 +319,12 @@ class Main {
                           contact.respond(data.id, res.body);
                         })
                         .catch(() => {
-                          this.current_requests.splice(
-                            this.current_requests.indexOf(data.body.id),
-                            1
-                          );
+                          setTimeout(() => {
+                            this.current_requests.splice(
+                              this.current_requests.indexOf(data.body.id),
+                              1
+                            );
+                          }, 20);
                           contact.respond(data.id);
                         });
                     } else if (
@@ -334,10 +344,12 @@ class Main {
                         });
                         responses = [...new Set(responses)];
                         if (responses.length == 1) responses = responses[0];
-                        this.current_requests.splice(
-                          this.current_requests.indexOf(data.body.id),
-                          1
-                        );
+                        setTimeout(() => {
+                          this.current_requests.splice(
+                            this.current_requests.indexOf(data.body.id),
+                            1
+                          );
+                        }, 20);
                         contact.respond(data.id, responses);
                       });
                     } else if (data.body.hops < 20) {
@@ -354,18 +366,22 @@ class Main {
                         });
                         responses = [...new Set(responses)];
                         if (responses.length == 1) responses = responses[0];
-                        this.current_requests.splice(
-                          this.current_requests.indexOf(data.body.id),
-                          1
-                        );
+                        setTimeout(() => {
+                          this.current_requests.splice(
+                            this.current_requests.indexOf(data.body.id),
+                            1
+                          );
+                        }, 20);
                         contact.respond(data.id, responses);
                       });
                     }
                     if (this.contacts.length == 1) {
-                      this.current_requests.splice(
-                        this.current_requests.indexOf(data.body.id),
-                        1
-                      );
+                      setTimeout(() => {
+                        this.current_requests.splice(
+                          this.current_requests.indexOf(data.body.id),
+                          1
+                        );
+                      }, 20);
                       contact.respond(data.id);
                     }
                   } else contact.respond(data.id);
@@ -384,16 +400,27 @@ class Main {
                   if (this.referralFromUuid(data.body.referent) === undefined)
                     this.referrals.push({
                       referent: data.body.referent,
-                      referees: []
+                      referees: [],
+                      hops: data.body.hops
                     });
                   let referral = this.referralFromUuid(data.body.referent);
 
                   if (data.body.rm) {
-                    this.referrals.splice(this.referrals.indexOf(referral), 1);
-                  } else {
-                    if (referral.referees.indexOf(data.from) != -1)
-                      referral.referees.push(data.from);
-                  }
+                    referral.referees.splice(
+                      referral.referees.indexOf(data.from),
+                      1
+                    );
+                    if (referral.referees.length == 0)
+                      this.referrals.splice(
+                        this.referrals.indexOf(referral),
+                        1
+                      );
+                  } else if (
+                    referral.referees.indexOf(data.from) != -1 &&
+                    data.body.hops >= referral.hops
+                  )
+                    referral.referees.push(data.from);
+
                   if (data.body.hops < 20) {
                     if (referral.referees.indexOf(data.from) != -1)
                       for (contact_ of this.contacts) {
@@ -405,104 +432,124 @@ class Main {
                     this.current_requests.indexOf(data.body.id),
                     1
                   );
-                  contact.respond(data.id);
+                  //contact.respond(data.id);
                 }
                 break;
               case "contact_req":
                 {
                   data.body.hops++;
-                  if (data.body.to == this.uuid) {
-                    this.callback("contact_req", data.body.encrypted).then(
-                      res => {
-                        res.body = JSON.parse(res.body);
-                        console.log(res.body.pub);
-                        this.addContact({
-                          uuid: res.body.from,
-                          pub: crypto.createPublicKey({
-                            key: res.body.pub,
-                            format: "der",
-                            type: "pkcs1",
-                            encoding: "base64"
-                          })
+                  if (this.current_requests.indexOf(data.body.id) === -1) {
+                    this.current_requests.push(data.body.id);
+                    if (data.body.to === this.uuid) {
+                      this.callback("contact_req", data.body.encrypted).then(
+                        res => {
+                          res.body = JSON.parse(res.body);
+                          console.log(res.body.pub);
+                          this.addContact({
+                            uuid: res.body.from,
+                            pub: crypto.createPublicKey({
+                              key: res.body.pub,
+                              format: "der",
+                              type: "pkcs1",
+                              encoding: "base64"
+                            })
+                          });
+                          console.log(
+                            this.pub
+                              .export({
+                                format: "der",
+                                type: "pkcs1"
+                              })
+                              .toString("base64")
+                          );
+                          sym_encrypt(
+                            res.key,
+                            this.pub
+                              .export({
+                                format: "der",
+                                type: "pkcs1"
+                              })
+                              .toString("base64")
+                          ).then(encrypted => {
+                            setTimeout(() => {
+                              this.current_requests.splice(
+                                this.current_requests.indexOf(data.body.id),
+                                1
+                              );
+                            }, 20);
+                            contact.respond(data.id, encrypted);
+                          });
+                        }
+                      );
+                    } else if (
+                      this.contactFromUuid(data.body.to) != undefined
+                    ) {
+                      this.contactFromUuid(data.body.to)
+                        .send(data.body, "contact_req")
+                        .then(res => {
+                          console.log(res);
+                          setTimeout(() => {
+                            this.current_requests.splice(
+                              this.current_requests.indexOf(data.body.id),
+                              1
+                            );
+                          }, 20);
+                          contact.respond(data.id, res.body);
+                        })
+                        .catch(() => {
+                          setTimeout(() => {
+                            this.current_requests.splice(
+                              this.current_requests.indexOf(data.body.id),
+                              1
+                            );
+                          }, 20);
+                          contact.respond(data.id);
                         });
-                        console.log(
-                          this.pub
-                            .export({
-                              format: "der",
-                              type: "pkcs1"
-                            })
-                            .toString("base64")
-                        );
-                        sym_encrypt(
-                          res.key,
-                          this.pub
-                            .export({
-                              format: "der",
-                              type: "pkcs1"
-                            })
-                            .toString("base64")
-                        ).then(encrypted => {
+                    } else if (
+                      this.referralFromUuid(data.body.to) != undefined
+                    ) {
+                      console.log("req");
+                      let promises;
+                      for (let contact_ of this.referralFromUuid(
+                        data.body.to
+                      )) {
+                        promises.push(contact_.send(data.body, "contact_req"));
+                      }
+                      Promise.allSettled(promises).then(results => {
+                        console.log(results);
+                        let responses = [];
+                        results.forEach(result => {
+                          if (result.status == "fulfilled")
+                            responses.push(result.value.body);
+                        });
+                        responses = [...new Set(responses)];
+                        contact.respond(data.id, responses);
+                      });
+                    } else if (data.body.hops < 20) {
+                      let promises = [];
+                      for (let contact_ of this.contacts) {
+                        if (contact_.uuid != data.from)
+                          promises.push(
+                            contact_.send(data.body, "contact_req")
+                          );
+                      }
+                      Promise.allSettled(promises).then(results => {
+                        let responses = [];
+                        results.forEach(result => {
+                          if (result.status == "fulfilled")
+                            responses.push(result.value.body);
+                        });
+                        responses = [...new Set(responses)];
+                        setTimeout(() => {
                           this.current_requests.splice(
                             this.current_requests.indexOf(data.body.id),
                             1
                           );
-                          contact.respond(data.id, encrypted);
-                        });
-                      }
-                    );
-                  } else if (this.contactFromUuid(data.body.to) != undefined) {
-                    this.contactFromUuid(data.body.to)
-                      .send(data.body, "contact_req")
-                      .then(res => {
-                        console.log(res);
-                        this.current_requests.splice(
-                          this.current_requests.indexOf(data.body.id),
-                          1
-                        );
-                        contact.respond(data.id, res.body);
-                      })
-                      .catch(() => {
-                        this.current_requests.splice(
-                          this.current_requests.indexOf(data.body.id),
-                          1
-                        );
-                        contact.respond(data.id);
+                        }, 20);
+                        contact.respond(data.id, responses);
                       });
-                  } else if (this.referralFromUuid(data.body.to) != undefined) {
-                    console.log("req");
-                    let promises;
-                    for (let contact_ of this.referralFromUuid(data.body.to)) {
-                      promises += contact_.send(data.body, "contact_req");
                     }
-                    Promise.allSettled(promises).then(results => {
-                      let responses = [];
-                      results.forEach(result => {
-                        if (result.status == "fulfilled")
-                          responses.push(result.value.body);
-                      });
-                      responses = [...new Set(responses)];
-                      contact.respond(data.id, responses);
-                    });
-                  } else if (data.body.hops < 20) {
-                    let promises = [];
-                    for (let contact_ of this.contacts) {
-                      if (contact_.uuid != data.from)
-                        promises.push(contact_.send(data.body, "contact_req"));
-                    }
-                    Promise.allSettled(promises).then(results => {
-                      let responses = [];
-                      results.forEach(result => {
-                        if (result.status == "fulfilled")
-                          responses.push(result.value.body);
-                      });
-                      responses = [...new Set(responses)];
-                      this.current_requests.splice(
-                        this.current_requests.indexOf(data.body.id),
-                        1
-                      );
-                      contact.respond(data.id, responses);
-                    });
-                  }
+                  } else contact.respond(data.id);
                 }
                 break;
               default: {
@@ -537,7 +584,7 @@ class Contact extends stream.Duplex {
     this.connected = false;
   }
   _write(chunk) {
-    this.send(chunk.toString("base64"), "message");
+    this.send(chunk.toString("base64"), "message", false);
   }
   _read() {}
   /**
@@ -546,7 +593,7 @@ class Contact extends stream.Duplex {
    * @param {string} type - the type of the message
    * @returns {Promise} a Promise that resolves with the response
    */
-  send(message, type) {
+  send(message, type, addEventListener = true) {
     return new Promise((resolve, reject) => {
       //console.log("write");
       let responded = false;
@@ -575,10 +622,11 @@ class Contact extends stream.Duplex {
         )
       );
 
-      this.parent.events_.prependOnceListener("id-" + id, data => {
-        responded = true;
-        resolve(data);
-      });
+      if (addEventListener)
+        this.parent.events_.prependOnceListener("id-" + id, data => {
+          responded = true;
+          resolve(data);
+        });
       this.socket.on("error", err => {
         debugger;
         responded = true;
@@ -586,15 +634,13 @@ class Contact extends stream.Duplex {
         this.parent.events_.removeAllListeners("id-" + id);
         console.log("send from " + this.parent.uuid + err);
         this.connect().then(() => {
-          this.send(message, type)
-            .then(res => resolve(res))
-            .catch(err => reject(err));
+          this.send(message, type).then(res => resolve(res));
         });
       });
       setTimeout(() => {
         if (!responded) {
           this.parent.events_.removeAllListeners("id-" + id);
-          reject("timeout");
+          resolve("timeout");
         }
       }, 60000);
     });
@@ -606,38 +652,35 @@ class Contact extends stream.Duplex {
    */
   respond(id, message = "") {
     //console.log("respond");
-    return new Promise((resolve, reject) => {
-      //console.log("write");
-      console.log({
-        from: this.parent.uuid,
-        body: message,
-        res: id,
-        ip: this.socket.remoteAddress,
-        port: this.socket.remotePort
-      });
-      this.socket.write(
-        JSON.stringify(
-          sign(
-            this.parent.priv,
-            JSON.stringify({
-              from: this.parent.uuid,
-              body: message,
-              res: id,
-              ip: this.socket.remoteAddress,
-              port: this.socket.remotePort
-            })
-          )
-        )
-      );
 
-      this.socket.on("error", err => {
-        debugger;
-        console.warn(err);
-        this.connect(contact).then(() => {
-          this.respond(id, message)
-            .then(res => resolve(res))
-            .catch(err => reject(err));
-        });
+    //console.log("write");
+    console.log({
+      from: this.parent.uuid,
+      body: message,
+      res: id,
+      ip: this.socket.remoteAddress,
+      port: this.socket.remotePort
+    });
+    this.socket.write(
+      JSON.stringify(
+        sign(
+          this.parent.priv,
+          JSON.stringify({
+            from: this.parent.uuid,
+            body: message,
+            res: id,
+            ip: this.socket.remoteAddress,
+            port: this.socket.remotePort
+          })
+        )
+      )
+    );
+
+    this.socket.on("error", err => {
+      debugger;
+      console.warn(err);
+      this.connect(contact).then(() => {
+        this.respond(id, message);
       });
     });
   }
@@ -797,7 +840,8 @@ class Contact extends stream.Duplex {
             rm: rm,
             id
           },
-          "referral"
+          "referral",
+          false
         );
     }
   }
