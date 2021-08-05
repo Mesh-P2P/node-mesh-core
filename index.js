@@ -3,9 +3,10 @@ const net = require("net");
 const getPort = require("get-port");
 const crypto = require("crypto");
 const stream = require("stream");
-const isIPv4 = /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/;
+const isIPv4 =
+  /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/;
 
-// TODO: **encryption/handshake**; compact
+// TODO: **encryption/handshake**; compact; priority levels (contacts)
 
 /**
  * The Interface
@@ -50,18 +51,18 @@ class Main {
     if (this.server)
       this.servers.push({
         server: net
-          .createServer(socket => {
-            socket.on("data", data => {
+          .createServer((socket) => {
+            socket.on("data", (data) => {
               this.handle_in(socket, data);
             });
           })
           .listen(this.port),
-        port: this.port
+        port: this.port,
       });
     for (let contact_ of this.contacts_) {
       let contact = new Contact(this, contact_, {});
       this.contacts.push(contact);
-      contact.connect().catch(err => {
+      contact.connect().catch((err) => {
         console.warn(err);
       });
     }
@@ -111,9 +112,9 @@ class Main {
         pub: this.pub
           .export({ format: "der", type: "pkcs1" })
           .toString("base64"),
-        from: this.uuid
+        from: this.uuid,
       })
-    ).then(encrypted => {
+    ).then((encrypted) => {
       for (let contact of this.contacts) {
         promises.push(
           contact.send(
@@ -121,27 +122,27 @@ class Main {
               to: uuid,
               hops: 0,
               encrypted: encrypted,
-              id
+              id,
             },
             "contact_req"
           )
         );
       }
-      Promise.allSettled(promises).then(results => {
-        results = results.filter(res => res.status == "fulfilled");
-        let responses = [...new Set(results.map(res => res.value.body))];
+      Promise.allSettled(promises).then((results) => {
+        results = results.filter((res) => res.status == "fulfilled");
+        let responses = [...new Set(results.map((res) => res.value.body))];
         if (responses.length == 0) console.log("No responses to contact_req");
         for (let res of responses) {
           try {
             if (typeof res !== "array") res = [res];
             for (let awnser of res) {
               if (awnser != "")
-                sym_decrypt(key, awnser).then(message => {
+                sym_decrypt(key, awnser).then((message) => {
                   console.log(
                     this.pub
                       .export({
                         format: "der",
-                        type: "pkcs1"
+                        type: "pkcs1",
                       })
                       .toString("base64")
                   );
@@ -152,8 +153,8 @@ class Main {
                         key: message,
                         format: "der",
                         type: "pkcs1",
-                        encoding: "base64"
-                      })
+                        encoding: "base64",
+                      }),
                     });
                     contact.sendIP();
                   }
@@ -173,7 +174,7 @@ class Main {
    * @return {Contact} Contact
    */
   contactFromUuid(uuid) {
-    return this.contacts.find(contact => {
+    return this.contacts.find((contact) => {
       return contact.uuid == uuid;
     });
   }
@@ -183,7 +184,7 @@ class Main {
    * @return {Object} Referral
    */
   referralFromUuid(uuid) {
-    return this.referrals.find(referral => {
+    return this.referrals.find((referral) => {
       return referral.referent == uuid;
     });
   }
@@ -193,7 +194,7 @@ class Main {
    * @returns {Contact} Contact
    */
   contactFromIp(ip) {
-    return this.contacts.find(contact => {
+    return this.contacts.find((contact) => {
       return contact.remoteIP === ip;
     });
   }
@@ -264,7 +265,7 @@ class Main {
                                 contact_to.pub,
                                 JSON.stringify({
                                   ip: this.ip,
-                                  port: contact_to.localPort
+                                  port: contact_to.localPort,
                                 })
                               )
                             )
@@ -277,7 +278,7 @@ class Main {
                                 contact_to.pub,
                                 JSON.stringify({
                                   ip: this.ip,
-                                  port: contact_to.localPort
+                                  port: contact_to.localPort,
                                 })
                               )
                             )
@@ -311,7 +312,7 @@ class Main {
                     ) {
                       this.contactFromUuid(data.body.to)
                         .send(data.body, "IP")
-                        .then(res => {
+                        .then((res) => {
                           this.current_requests.splice(
                             this.current_requests.indexOf(data.body.id),
                             1
@@ -336,9 +337,9 @@ class Main {
                       )) {
                         promises += contact_.send(data.body, "IP");
                       }
-                      Promise.allSettled(promises).then(results => {
+                      Promise.allSettled(promises).then((results) => {
                         let responses = [];
-                        results.forEach(result => {
+                        results.forEach((result) => {
                           if (result.status == "fulfilled")
                             responses.push(result.value.body);
                         });
@@ -358,9 +359,9 @@ class Main {
                         if (contact_.uuid != data.from)
                           promises.push(contact_.send(data.body, "IP"));
                       }
-                      Promise.allSettled(promises).then(results => {
+                      Promise.allSettled(promises).then((results) => {
                         let responses = [];
-                        results.forEach(result => {
+                        results.forEach((result) => {
                           if (result.status == "fulfilled")
                             responses.push(result.value.body);
                         });
@@ -401,7 +402,7 @@ class Main {
                     this.referrals.push({
                       referent: data.body.referent,
                       referees: [],
-                      hops: data.body.hops
+                      hops: data.body.hops,
                     });
                   let referral = this.referralFromUuid(data.body.referent);
 
@@ -442,7 +443,7 @@ class Main {
                     this.current_requests.push(data.body.id);
                     if (data.body.to === this.uuid) {
                       this.callback("contact_req", data.body.encrypted).then(
-                        res => {
+                        (res) => {
                           res.body = JSON.parse(res.body);
                           console.log(res.body.pub);
                           this.addContact({
@@ -451,14 +452,14 @@ class Main {
                               key: res.body.pub,
                               format: "der",
                               type: "pkcs1",
-                              encoding: "base64"
-                            })
+                              encoding: "base64",
+                            }),
                           });
                           console.log(
                             this.pub
                               .export({
                                 format: "der",
-                                type: "pkcs1"
+                                type: "pkcs1",
                               })
                               .toString("base64")
                           );
@@ -467,10 +468,10 @@ class Main {
                             this.pub
                               .export({
                                 format: "der",
-                                type: "pkcs1"
+                                type: "pkcs1",
                               })
                               .toString("base64")
-                          ).then(encrypted => {
+                          ).then((encrypted) => {
                             setTimeout(() => {
                               this.current_requests.splice(
                                 this.current_requests.indexOf(data.body.id),
@@ -486,7 +487,7 @@ class Main {
                     ) {
                       this.contactFromUuid(data.body.to)
                         .send(data.body, "contact_req")
-                        .then(res => {
+                        .then((res) => {
                           console.log(res);
                           setTimeout(() => {
                             this.current_requests.splice(
@@ -515,10 +516,10 @@ class Main {
                       )) {
                         promises.push(contact_.send(data.body, "contact_req"));
                       }
-                      Promise.allSettled(promises).then(results => {
+                      Promise.allSettled(promises).then((results) => {
                         console.log(results);
                         let responses = [];
-                        results.forEach(result => {
+                        results.forEach((result) => {
                           if (result.status == "fulfilled")
                             responses.push(result.value.body);
                         });
@@ -533,9 +534,9 @@ class Main {
                             contact_.send(data.body, "contact_req")
                           );
                       }
-                      Promise.allSettled(promises).then(results => {
+                      Promise.allSettled(promises).then((results) => {
                         let responses = [];
-                        results.forEach(result => {
+                        results.forEach((result) => {
                           if (result.status == "fulfilled")
                             responses.push(result.value.body);
                         });
@@ -604,7 +605,7 @@ class Contact extends stream.Duplex {
         body: message,
         id: id,
         ip: this.socket.remoteAddress,
-        port: this.socket.remotePort
+        port: this.socket.remotePort,
       });
       this.socket.write(
         JSON.stringify(
@@ -616,25 +617,25 @@ class Contact extends stream.Duplex {
               body: message,
               id: id,
               ip: this.socket.remoteAddress,
-              port: this.socket.remotePort
+              port: this.socket.remotePort,
             })
           )
         )
       );
 
       if (addEventListener)
-        this.parent.events_.prependOnceListener("id-" + id, data => {
+        this.parent.events_.prependOnceListener("id-" + id, (data) => {
           responded = true;
           resolve(data);
         });
-      this.socket.on("error", err => {
+      this.socket.on("error", (err) => {
         debugger;
         responded = true;
         this.connected = false;
         this.parent.events_.removeAllListeners("id-" + id);
         console.log("send from " + this.parent.uuid + err);
         this.connect().then(() => {
-          this.send(message, type).then(res => resolve(res));
+          this.send(message, type).then((res) => resolve(res));
         });
       });
       setTimeout(() => {
@@ -659,7 +660,7 @@ class Contact extends stream.Duplex {
       body: message,
       res: id,
       ip: this.socket.remoteAddress,
-      port: this.socket.remotePort
+      port: this.socket.remotePort,
     });
     this.socket.write(
       JSON.stringify(
@@ -670,13 +671,13 @@ class Contact extends stream.Duplex {
             body: message,
             res: id,
             ip: this.socket.remoteAddress,
-            port: this.socket.remotePort
+            port: this.socket.remotePort,
           })
         )
       )
     );
 
-    this.socket.on("error", err => {
+    this.socket.on("error", (err) => {
       debugger;
       console.warn(err);
       this.connect(contact).then(() => {
@@ -693,20 +694,20 @@ class Contact extends stream.Duplex {
       if (this.socket && !this.socket.destroyed && !this.socket._hadError) {
         this.send("", "message");
       } else {
-        if (!this.parent.servers.find(server => this.port == server.port)) {
+        if (!this.parent.servers.find((server) => this.port == server.port)) {
           this.socket = net.createConnection({
             port: this.remotePort,
-            host: this.remoteIP
+            host: this.remoteIP,
           });
           this.socket.setKeepAlive(true);
           this.socket.on("ready", () => {
             this.send("", "message");
             resolve();
           });
-          this.socket.on("data", data => {
+          this.socket.on("data", (data) => {
             this.parent.handle_in(this.socket, data);
           });
-          this.socket.on("error", err => {
+          this.socket.on("error", (err) => {
             if (
               this.connected &&
               this.parent.referralFromUuid(this.uuid) != undefined
@@ -722,7 +723,7 @@ class Contact extends stream.Duplex {
             this.try++;
             if (this.try < 10) {
               setTimeout(() => {
-                this.connect().catch(err => {
+                this.connect().catch((err) => {
                   reject(err);
                 });
               }, 10);
@@ -748,7 +749,7 @@ class Contact extends stream.Duplex {
             this.socket.end();
             this.try++;
             if (this.try < 20) {
-              this.connect(contact).catch(err => {
+              this.connect(contact).catch((err) => {
                 reject(err);
               });
             } else if (this.try < 50) {
@@ -791,19 +792,19 @@ class Contact extends stream.Duplex {
                   JSON.stringify({
                     from: this.parent.uuid,
                     IP: this.parent.ip,
-                    port: this.localPort
+                    port: this.localPort,
                   })
                 )
               ),
-              id
+              id,
             },
             "IP"
           )
         );
     }
-    Promise.allSettled(promises).then(results => {
-      results = results.filter(res => res.status == "fulfilled");
-      let responses = [...new Set(results.map(res => res.value.body))];
+    Promise.allSettled(promises).then((results) => {
+      results = results.filter((res) => res.status == "fulfilled");
+      let responses = [...new Set(results.map((res) => res.value.body))];
       if (responses.length == 0) console.log("No responses to IP");
       let awnsers = [];
       for (let res of responses) {
@@ -838,7 +839,7 @@ class Contact extends stream.Duplex {
             referent: uuid,
             hops: 1,
             rm: rm,
-            id
+            id,
           },
           "referral",
           false
@@ -857,7 +858,7 @@ class Contact extends stream.Duplex {
     let port = this.localPort + 1;
     port--;
     if (
-      !this.parent.servers.find(server => server.port == port) &&
+      !this.parent.servers.find((server) => server.port == port) &&
       !this.connected
     ) {
       setTimeout(() => {
@@ -866,9 +867,9 @@ class Contact extends stream.Duplex {
           host: data.ip,
           port: data.port,
           localPort: port,
-          timeout: 100
+          timeout: 100,
         });
-        socket.on("data", data => {
+        socket.on("data", (data) => {
           this.parent.handle_in(socket, data);
         });
         socket.on("ready", () => {
@@ -876,28 +877,28 @@ class Contact extends stream.Duplex {
           this.socket = socket;
           this.send("", "message");
         });
-        socket.on("error", err => {
+        socket.on("error", (err) => {
           console.log(err);
         });
-        socket.on("close", err => {
+        socket.on("close", (err) => {
           console.log("server: " + this.parent.uuid);
 
-          let server = net.createServer(socket => {
+          let server = net.createServer((socket) => {
             socket.on("ready", () => {
               this.connected = true;
               this.socket = socket;
             });
-            socket.on("data", data => {
-              if (!this.parent.servers.find(server_ => server == server_))
+            socket.on("data", (data) => {
+              if (!this.parent.servers.find((server_) => server == server_))
                 this.parent.servers.push(server);
 
               this.parent.handle_in(socket, data);
             });
-            socket.on("error", err => {
+            socket.on("error", (err) => {
               this.connected = false;
               this.parent.servers.splice(
                 this.parent.servers.indexOf(
-                  this.parent.servers.find(server_ => server == server_)
+                  this.parent.servers.find((server_) => server == server_)
                 ),
                 1
               );
@@ -906,9 +907,9 @@ class Contact extends stream.Duplex {
           server.listen(port);
           this.parent.servers.push({
             server: server,
-            port: port
+            port: port,
           });
-          server.on("error", err => {
+          server.on("error", (err) => {
             console.log(err);
           });
         });
@@ -959,7 +960,7 @@ function sym_encrypt(key, message) {
 
     let encrypted = "";
     cipher.setEncoding("base64");
-    cipher.on("data", chunk => (encrypted += chunk));
+    cipher.on("data", (chunk) => (encrypted += chunk));
     cipher.on("end", () =>
       resolve({ message: encrypted, iv: Buffer.from(iv).toString("base64") })
     );
@@ -983,7 +984,7 @@ function sym_decrypt(key, { iv, message }) {
 
     let decrypted = "";
 
-    decipher.on("data", chunk => (decrypted += chunk));
+    decipher.on("data", (chunk) => (decrypted += chunk));
     decipher.on("end", () => {
       resolve(decrypted);
     });
@@ -1005,7 +1006,7 @@ function encrypt(key, message) {
       {
         key: key,
         padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: "sha256"
+        oaepHash: "sha256",
       },
       Buffer.from(message)
     )
@@ -1024,7 +1025,7 @@ function decrypt(key, message) {
     {
       key: key,
       padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-      oaepHash: "sha256"
+      oaepHash: "sha256",
     },
     Buffer.from(message, "base64")
   );
