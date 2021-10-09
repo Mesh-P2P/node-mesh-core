@@ -21,6 +21,7 @@
   },
   "homepage": "https://github.com/Mesh-P2P/node-mesh-core#readme",
   "dependencies": {
-    "get-port": "^5.1.1"
+    "get-port": "^5.1.1",
+    "pem": "^1.14.4"
   }
 }
