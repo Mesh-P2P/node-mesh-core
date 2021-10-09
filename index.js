@@ -7,7 +7,7 @@ const tls = require("tls");
 const pem = require("pem");
 const isIPv4 = /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/;
 
-// TODO: **encryption/handshake**; compact; priority levels (contacts); major refactor
+// TODO: compact; priority levels (contacts); major refactor
 
 /**
  * The Interface
@@ -151,7 +151,7 @@ class Main {
                       .toString("base64")
                   );
                   if (this.contactFromUuid(uuid) == undefined) {
-                    pem.getPublicKey(message, (err, publicKey) => {
+                    pem.getPublicKey(message, (err, { publicKey }) => {
                       console.log(publicKey);
                       let contact = this.addContact({
                         uuid: uuid,
@@ -248,6 +248,7 @@ class Main {
                         decrypt(this.priv, data.body.encrypted.message)
                       );
                       if (
+                        this.contactFromUuid(message.from) &&
                         verify(
                           this.contactFromUuid(message.from).pub,
                           data.body.encrypted
@@ -449,31 +450,37 @@ class Main {
                         res => {
                           res.body = JSON.parse(res.body);
                           console.log(res.body.cert);
-                          pem.getPublicKey(res.body.cert, (err, publicKey) => {
-                            this.addContact({
-                              uuid: res.body.from,
-                              cert: res.body.cert,
-                              pub: crypto.createPublicKey(publicKey)
-                            });
-                          });
-
-                          console.log(
-                            this.pub
-                              .export({
-                                format: "der",
-                                type: "pkcs1"
-                              })
-                              .toString("base64")
-                          );
-                          sym_encrypt(res.key, this.cert).then(encrypted => {
-                            setTimeout(() => {
-                              this.current_requests.splice(
-                                this.current_requests.indexOf(data.body.id),
-                                1
+                          pem.getPublicKey(
+                            res.body.cert,
+                            (err, { publicKey }) => {
+                              this.addContact({
+                                uuid: res.body.from,
+                                cert: res.body.cert,
+                                pub: crypto.createPublicKey(publicKey)
+                              });
+                              console.log(
+                                this.pub
+                                  .export({
+                                    format: "der",
+                                    type: "pkcs1"
+                                  })
+                                  .toString("base64")
                               );
-                            }, 20);
-                            contact.respond(data.id, encrypted);
-                          });
+                              sym_encrypt(res.key, this.cert).then(
+                                encrypted => {
+                                  setTimeout(() => {
+                                    this.current_requests.splice(
+                                      this.current_requests.indexOf(
+                                        data.body.id
+                                      ),
+                                      1
+                                    );
+                                  }, 20);
+                                  contact.respond(data.id, encrypted);
+                                }
+                              );
+                            }
+                          );
                         }
                       );
                     } else if (
@@ -808,12 +815,12 @@ class Contact extends stream.Duplex {
       let awnsers = [];
       for (let res of responses) {
         try {
-          if (verify(this.pub, res)) {
+          if (res && verify(this.pub, res)) {
             res.message = decrypt(this.parent.priv, res.message).toString();
             awnsers.push(res);
           }
-        } catch {
-          console.log("Error");
+        } catch (e) {
+          console.log("Error: " + e);
         }
       }
       let res = [...new Set(awnsers)];
@@ -853,13 +860,12 @@ class Contact extends stream.Duplex {
    * @param {number} timeout
    */
   punchHole(data, timeout = 0) {
-    console.log(data);
     let port = this.localPort + 1;
     port--;
-    if (
-      !this.parent.servers.find(server => server.port == port) &&
-      !this.connected
-    ) {
+    if (!this.connected) {
+      getPort().then(port => console.log(port));
+      if (this.parent.servers.find(server => server.port == port))
+        getPort().then(p => (port = p));
       setTimeout(() => {
         console.log("punch on " + port);
         let socket = net.createConnection({
@@ -882,38 +888,40 @@ class Contact extends stream.Duplex {
         socket.on("close", err => {
           console.log("server: " + this.parent.uuid);
 
-          let server = net.createServer(socket => {
-            socket.on("ready", () => {
-              this.connected = true;
-              this.socket = socket;
-            });
-            socket.on("data", data => {
-              if (!this.parent.servers.find(server_ => server == server_))
-                this.parent.servers.push(server);
+          if (!this.parent.servers.find(server => server.port == port)) {
+            let server = net.createServer(socket => {
+              socket.on("ready", () => {
+                this.connected = true;
+                this.socket = socket;
+              });
+              socket.on("data", data => {
+                if (!this.parent.servers.find(server_ => server == server_))
+                  this.parent.servers.push(server);
 
-              this.parent.handle_in(socket, data);
+                this.parent.handle_in(socket, data);
+              });
+              socket.on("error", err => {
+                this.connected = false;
+                this.parent.servers.splice(
+                  this.parent.servers.indexOf(
+                    this.parent.servers.find(server_ => server == server_)
+                  ),
+                  1
+                );
+              });
             });
-            socket.on("error", err => {
-              this.connected = false;
-              this.parent.servers.splice(
-                this.parent.servers.indexOf(
-                  this.parent.servers.find(server_ => server == server_)
-                ),
-                1
-              );
+            server.listen(port);
+            this.parent.servers.push({
+              server: server,
+              port: port
             });
-          });
-          server.listen(port);
-          this.parent.servers.push({
-            server: server,
-            port: port
-          });
-          server.on("error", err => {
-            console.log(err);
-          });
+            server.on("error", err => {
+              console.log(err);
+            });
+          } else console.log("already listening on port " + port);
         });
       }, timeout);
-    } else console.log("already listening on port " + port);
+    } else console.log("already connected");
   }
 }
 /**
@@ -1050,113 +1058,4 @@ function splitMessages(data) {
     }
   }
   return out;
-}
-
-function ssl_s(inStream, pub) {
-  return new Promise((resolve, reject) => {
-    let techs = ["ecdh-rsa", "dh-rsa"];
-    let curves = crypto.getCurves();
-    let curve = "secp160r2";
-    let dh = crypto.createECDH(curve);
-    let myKey = dh.generateKeys();
-    let iv = crypto.randomBytes(16).toString("base64");
-    inStream.prependOnceListener("data", res => {
-      res = JSON.parse(res);
-      if (!verify(pub, res)) reject();
-      res = res.message;
-      if (res.tech != techs[0]) {
-        switch (res.tech) {
-          case "dh-rsa":
-            dh = crypto.createDiffieHellman(
-              res.prime,
-              "base64",
-              res.generator,
-              "base64"
-            );
-            myKey = dh.generateKeys();
-        }
-      }
-      secret = dh.computeSecret(res.key, "base64");
-      let cipher = crypto.createCipheriv(
-        "aes-192",
-        secret,
-        Buffer.from(iv, "base64")
-      );
-      let decipher = crypto.createDecipheriv(
-        "aes-192",
-        secret,
-        Buffer.from(iv, "base64")
-      );
-      let interface = new stream.Duplex({
-        write(chunk, encoding, callback) {
-          cipher.write(chunk, encoding, callback);
-        },
-        read(size) {
-          decipher.read(size);
-        }
-      });
-      decipher.on("data", data => interface.emit("data", data));
-
-      cipher.pipe(inStream).pipe(decipher);
-      resolve(interface);
-    });
-
-    inStream.write(
-      JSON.stringify({
-        iv,
-        techs,
-        curves,
-        key: { curve, key: myKey.toString("base64") }
-      })
-    );
-  });
-}
-function ssl_r(inStream, priv) {
-  return new Promise((resolve, reject) => {
-    let techs = ["ecdh-rsa", "dh-rsa"];
-    let curves = crypto.getCurves();
-    inStream.prependOnceListener("data", data => {
-      data = JSON.parse(data);
-      if (!techs.includes(data.techs[0])) {
-      }
-      switch (data.techs[0]) {
-        case "ecdh-rsa":
-          if (!curves.include(data.key.curve)) {
-          } else {
-            let dh = crypto.createECDH(data.key.curve);
-            let myKey = dh.generateKeys();
-            inStream.write(
-              JSON.stringify(
-                sign(priv, JSON.stringify({ key: myKey, tech: data.techs[0] }))
-              )
-            );
-          }
-          break;
-        case "dh-rsa":
-      }
-      let secret = dh.computeSecret(data.key.key, "base64");
-      let cipher = crypto.createCipheriv(
-        "aes-192",
-        secret,
-        Buffer.from(data.iv, "base64")
-      );
-      let decipher = crypto.createCipheriv(
-        "aes-192",
-        secret,
-        Buffer.from(data.iv, "base64")
-      );
-      let interface = new stream.Duplex({
-        write(chunk, encoding, callback) {
-          cipher.write(chunk, encoding, callback);
-        },
-        read(size) {
-          decipher.read(size);
-        }
-      });
-      decipher.on("data", data => interface.emit("data", data));
-
-      cipher.pipe(inStream).pipe(decipher);
-      resolve(interface);
-    });
-  });
 }
