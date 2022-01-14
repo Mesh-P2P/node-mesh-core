@@ -5,77 +5,388 @@ const crypto = require("crypto");
 const stream = require("stream");
 const tls = require("tls");
 const pem = require("pem");
-const isIPv4 = /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/;
+const isIPv4 =
+  /^::(ffff)?:(?!0)(?!.*\.$)((1?\d?\d|25[0-5]|2[0-4]\d)(\.|$)){4}$/;
+const sha256 = crypto.createHash('sha256')
 
 // TODO: compact; priority levels (contacts); major refactor
 
 /**
  * The Interface
- * @param {Object} self - this Peer
- * @param {string} self.uuid - its uuid
- * @param {PublicKey} self.pub - its public key (RSA)
- * @param {PrivateKey} self.priv - its private key (RSA)
- * @param {string} self.ip
- * @param {number} self.port
- * @param {Object[]} contacts_ - Contacts
+ * @param {Object} options
+ * @param {string} options.uuid - uuid
+ * @param {PublicKey} options.pub - public key (RSA)
+ * @param {PrivateKey} options.priv - private key (RSA)
+ * @param {Object[]} addons - array of optional addons
+ * @param {Function[]} addons.functions - array of additional functions
+ * @param {Object[]} addons.types - array of additional message types
+ * @param {number} addon.types.id - type id
+ * @param {string} addon.types.name
+ * @param {Function} addon.types.rx - function called receiving message type
+ * @param {Function} addon.types.tx - function for sending message type
+ * @param {Object[]} addons.types.types - Array of subtypes (same as types)
+ * @param {Object[]} contacts_ - Contacts initializers
  * @param {string} contacts_.uuid - its uuid
  * @param {PublicKey} contacts_.pub - its public key (RSA)
  * @param {string} contacts_.remoteIP - its IP address
  * @param {number} contacts_.remotePort - its port
+ * @param {Object[]} contacts - contact classes
  * @param {Object[]} referrals - Referrals
  * @param {Function} callback - callback promise that handles contact requests ("contact_req", "contact_req_answers")
- * @param {boolean} server - is server (optional)
  */
 class Main {
   current_requests = [];
   constructor(
-    self,
+    options,
+    addons = [],
     contacts_ = [],
-    referrals = [],
-    callback = () => {},
-    server = false
+    contacts = [],
+    callback = () => {}
   ) {
-    this.uuid = self.uuid;
-    this.priv = crypto.createPrivateKey(self.priv);
-    this.cert = self.cert;
-    this.pub = crypto.createPublicKey(self.pub);
-    this.ip = self.ip;
-    this.port = self.port;
+    this.addons = addons;
+    this.msgTypes = {
+      0: {
+        rx: this.onResponse,
+        tx: this.sendResponse,
+      },
+      1: {
+        rx: this.onDirect,
+        tx: this.sendDirect,
+      },
+      2: {
+        rx: this.onConfig,
+        tx: this.sendConfig,
+        0: {
+          rx: this.onJsonConfig,
+          tx: this.sendJsonConfig,
+        },
+        1: {
+          rx: this.onDistance,
+          tx: this.sendDistance,
+        },
+        2: {
+          rx: this.onDistanceWithoutSelf,
+          tx: this.sendDistanceWithoutSelf,
+        },
+      },
+      3: {
+        rx: this.onBroadcast,
+        tx: this.sendBroadcast,
+      },
+      4: {
+        rx: this.onRoute,
+        tx: this.sendRoute,
+        0: {
+          rx: this.onConnect,
+          tx: this.sendConnect,
+        },
+        1: {
+          rx: this.onContactRequest,
+          tx: this.sendContactRequest,
+        },
+      },
+    };
+    this.options = options;
+    this.uuid = options.uuid;
+    this.priv = crypto.createPrivateKey(options.priv);
+    this.cert = options.cert;
+    this.pub = crypto.createPublicKey(options.pub);
     this.contacts_ = contacts_;
-    this.contacts = [];
-    this.referrals = referrals;
-    this.server = server;
+    this.contacts = contacts;
+    this.distances = {}; // {'uuid':{min,'uuid': {distance, contact}}}
     this.servers = [];
+    this.msgHashes = [];
     this.callback = callback;
     this.events = new events.EventEmitter().setMaxListeners(0);
     this.events_ = new events.EventEmitter().setMaxListeners(0);
 
-    if (this.server)
-      this.servers.push({
-        server: tls
-          .createServer(
-            {
-              cert: this.cert,
-              key: this.priv.export({ type: "pkcs8", format: "pem" })
-            },
-            socket => {
-              socket.on("data", data => {
-                this.handle_in(socket, data);
-              });
-            }
-          )
-          .listen(this.port),
-        port: this.port
-      });
+    for (addon of addons) this.initAddon(addon, addon);
+
+    // try (unencrypted) server on 7575 else connect to 7575
+    // udp broadcast
+
     for (let contact_ of this.contacts_) {
       let contact = new Contact(this, contact_, {});
       this.contacts.push(contact);
-      contact.connect().catch(err => {
+      contact.connect().catch((err) => {
         console.warn(err);
       });
     }
 
     console.log(this.uuid + " created");
+  }
+  /**
+   * receiving Response (0)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onResponse(message, id, contact) {
+    contact.emit("id-" + id, message);
+  }
+  /**
+   * send response (0)
+   * @param {Buffer} message
+   * @param {Buffer} id
+   * @param {number} status
+   * @param {Contact} contact
+   */
+  sendResponse(message, id, contact) {
+    contact.send(Buffer.concat([message]), 0, false, id)
+  }
+  /**
+   * receiving Direct message (1)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onDirect(message, id, contact) {
+    contact.push(message);
+  }
+  /**
+   * send Direct message (1)
+   * @param {Buffer} message 
+   * @param {Contact} contact 
+   */
+  sendDirect(message, contact) {
+    contact.send(message, 1, false)
+  }
+  /**
+   * receiving Config message (2)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onConfig(message, id, contact) {
+    let type = message.slice(0, 1).readUInt8();
+    message = message.slice(1);
+    this.msgTypes[2][type].rx(message, id, contact);
+  }
+  /**
+   * send Config message (2)
+   * @param {Buffer} message 
+   * @param {number} type 
+   * @param {Contact} contact 
+   * @param {boolean} addEventListener (optional) - false on default
+   */
+  sendConfig(message, type, contact, addEventListener = false) {
+    contact.send(Buffer.concat([Buffer.allocunsafe(1).writeUInt8(type), message]), 2, addEventListener)
+  }
+  /**
+   * receiving Distance message (2.0)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onJsonConfig(message, id, contact) {
+    message = JSON.parse(message);
+  }
+  /**
+   * send JSON Config message (2.0)
+   * @param {Object} options 
+   * @param {Contact} contact 
+   */
+  sendJsonConfig(options, contact) {
+    contact.parent.msgTypes[2].tx(Buffer.from(JSON.stringify(options)), 0, contact)
+  }
+  /**
+   * receiving Distance message (2.1)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onDistance(message, id, contact) {
+    let uuid = message.slice(0, 16);
+    let distance = message.slice(16);
+  }
+  /**
+   * send Distance message (2.1)
+   * @param {number} distance 
+   * @param {Buffer} uuid 
+   * @param {Contact} contact 
+   */
+  sendDistance(distance, uuid, contact) {
+    contact.parent.msgTypes[2].tx(Buffer.concat([uuid, Buffer.allocunsafe(1).writeUInt8(distance)]), 1, contact)
+  }
+  /**
+   * receiving Distance without self message (2.2)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onDistanceWithoutSelf(message, id, contact) {
+    let uuid = message;
+  }
+  /**
+   * send Distance without self message (2.2)
+   * @param {Buffer} uuid 
+   * @param {Contact} contact 
+   */
+  sendDistanceWithoutSelf(uuid, contact) {
+    contact.parent.msgTypes[2].tx(uuid, 2, contact)
+  }
+  /**
+   * receiving Broadcast message (3)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onBroadcast(message, id, contact) {
+    let ttl = message.slice(0, 1).readUInt8();
+    let type = message.slice(1, 2).readUInt8();
+    message = message.slice(2);
+
+    let hashes = contact.parent.msgHashes;
+    let hash = sha256.update(message).digest();
+    if (hashes.indexOf(hash) !== -1) {
+      contact.parent.msgTypes[0].tx(Buffer.alloc(0), id, contact)
+      return
+    }
+    hashes.push(hash);
+    setTimeout(() => {
+      if (hashes.indexOf(hash) !== -1) hashes.splice(hashes.indexOf(hash), 1);
+    }, 120000)
+
+    this.msgTypes[3][type].rx(message, id, contact);
+    if (ttl > 0) {
+      ttl--
+      let promises = [];
+
+      contact.parent.contacts.forEach(contact_ => {
+        if (contact_ != contact) promises.push(
+          contact_.send(Buffer.concat([
+            Buffer.allocunsafe(1).writeUInt8(ttl),
+            Buffer.allocunsafe(1).writeUInt8(type),
+            message
+          ])))
+      })
+      Promise.allSettled(promises).then(results => {
+        results = results.map(result => result.value);
+        results = results.map(result => {
+          if (result.length < 2) return result
+          let resArray = []
+          let done = false;
+          while (result.length > 0) {
+            let length = result.slice(0, 2).readBigInt16BE();
+            let message = result.slice(2, length + 2);
+            resArray.push(message)
+            result = result.slice(length + 2)
+          }
+          return resArray
+        })
+        results = results.flat()
+
+        results = [...new Set(results)];
+
+        //Bufferize
+        contact.parent.msgTypes[0].tx(results, id, contact)
+      })
+    }
+
+  }
+  /**
+   * send Broadcast message (3)
+   * @param {Buffer} message 
+   * @param {number} type 
+   * @param {Main} self 
+   */
+  sendBroadcast(message, type, self) {
+    let ttl = Buffer.allocunsafe(1).writeUInt8(crypto.randomInt(self.options.ttlVariation || 2) + self.options.minttl || 5)
+    let buffer = Buffer.concat([ttl, Buffer.allocunsafe(1).writeUInt8(type), message])
+    let promises = [];
+    self.contacts.forEach(contact => {
+      promises.push(contact.send(buffer, 3))
+    })
+  }
+  /**
+   * receiving Route message (4)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onRoute(message, id, contact) {
+    let ttl = message.slice(0, 1).readUInt8();
+    let receiver = message.slice(1, 17);
+    let type = message.slice(17, 18).readUInt8();
+    message = message.slice(18);
+    this.msgTypes[4][type].rx(message, id, contact);
+  }
+  /**
+   * send Route message (4)
+   * @param {Buffer} message 
+   * @param {number} type 
+   * @param {Contact} contact 
+   */
+  sendRoute(message, type, contact) {
+    let uuid = typeof contact === 'string' ? contact : contact.uuid;
+    let ttl = Buffer.allocunsafe(1).writeUInt8(crypto.randomInt(self.options.ttlVariation || 2) + self.options.minttl || 5)
+    let buffer = Buffer.concat([ttl, uuid, Buffer.allocunsafe(1).writeUInt8(type), message])
+  }
+  /**
+   * receiving Connect message (4.0)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onConnect(message, id, contact) {
+    //signature
+    //decrypt asym
+    let type = message.slice(0, 1).readUInt8();
+    let uuid = message.slice(1, 17);
+    let port = message.slice(17, 18).readUInt16BE();
+    //ip
+  }
+  /**
+   * send Connect message (4.0)
+   * @param {Contact} contact
+   */
+  sendConnect(contact) {
+    //port; ip
+    contact.parent.msgTypes[4].tx(Buffer.concat([contact.parent.uuid, port, ip]), 2, contact)
+  }
+  /**
+   * receiving Contact Request message (4.1)
+   * @param {Buffer} message
+   * @param {number} id
+   * @param {Contact} contact
+   */
+  onContactRequest(message, id, contact) {
+    // decrypt sym
+    let uuid = message.slice(0, 16);
+    let pub = message.slice(16);
+  }
+  /**
+   * send Contact Request message (4.1)
+   * @param {Buffer} uuid 
+   * @param {Key} key 
+   * @param {Main} self 
+   */
+  sendContactRequest(uuid, key, self) {
+    let buffer = Buffer.concat([self.uuid, self.pub]) // pub needs to be buffer
+    //encrypt buffer
+    contact.parent.msgTypes[2].tx(buffer, 2, uuid)
+  }
+  /**
+   * adds Addon msgTypes to this.msgTypes
+   * @param {Object} addon
+   * @param {Object} main
+   * @param {Object} root - (optional) where to add the msgTypes (used for subtypes)
+   */
+  initAddon(addon, main, root = this.msgTypes) {
+    for (type of addon.types) {
+      if (root[type.id]) {
+        if (addon.rx)
+          throw new Error(
+            `Addon ${type.name} wants add message type ${type.id} in ${main.name} (${main.id}) but it already exists`
+          );
+        initAddon(type, main, root[type.id]);
+      } else {
+        root[type.id].addon = main;
+        root[type.id].rx = type.rx;
+        root[type.id].tx = type.tx;
+        initAddon(type, main, root[type.id]);
+      }
+    }
   }
   /**
    * adds a contact to contacts
@@ -116,9 +427,9 @@ class Main {
       key,
       JSON.stringify({
         cert: this.cert,
-        from: this.uuid
+        from: this.uuid,
       })
-    ).then(encrypted => {
+    ).then((encrypted) => {
       for (let contact of this.contacts) {
         promises.push(
           contact.send(
@@ -126,27 +437,27 @@ class Main {
               to: uuid,
               hops: 0,
               encrypted: encrypted,
-              id
+              id,
             },
             "contact_req"
           )
         );
       }
-      Promise.allSettled(promises).then(results => {
-        results = results.filter(res => res.status == "fulfilled");
-        let responses = [...new Set(results.map(res => res.value.body))];
+      Promise.allSettled(promises).then((results) => {
+        results = results.filter((res) => res.status == "fulfilled");
+        let responses = [...new Set(results.map((res) => res.value.body))];
         if (responses.length == 0) console.log("No responses to contact_req");
         for (let res of responses) {
           try {
             if (typeof res !== "array") res = [res];
             for (let awnser of res) {
               if (awnser != "")
-                sym_decrypt(key, awnser).then(message => {
+                sym_decrypt(key, awnser).then((message) => {
                   console.log(
                     this.pub
                       .export({
                         format: "der",
-                        type: "pkcs1"
+                        type: "pkcs1",
                       })
                       .toString("base64")
                   );
@@ -156,7 +467,7 @@ class Main {
                       let contact = this.addContact({
                         uuid: uuid,
                         cert: message,
-                        pub: crypto.createPublicKey(publicKey)
+                        pub: crypto.createPublicKey(publicKey),
                       });
                       contact.sendIP();
                     });
@@ -177,7 +488,7 @@ class Main {
    * @return {Contact} Contact
    */
   contactFromUuid(uuid) {
-    return this.contacts.find(contact => {
+    return this.contacts.find((contact) => {
       return contact.uuid == uuid;
     });
   }
@@ -187,7 +498,7 @@ class Main {
    * @return {Object} Referral
    */
   referralFromUuid(uuid) {
-    return this.referrals.find(referral => {
+    return this.referrals.find((referral) => {
       return referral.referent == uuid;
     });
   }
@@ -197,371 +508,9 @@ class Main {
    * @returns {Contact} Contact
    */
   contactFromIp(ip) {
-    return this.contacts.find(contact => {
+    return this.contacts.find((contact) => {
       return contact.remoteIP === ip;
     });
-  }
-  async handle_in(socket, raw) {
-    /*if (!socket.key) {
-      socket.key = crypto.createSecretKey(decrypt(this.priv, raw));
-      console.log(decrypt(this.priv, raw));
-      console.log(!!socket.key);
-    } else*/
-    for (let message of splitMessages(raw.toString())) {
-      if (message !== "") {
-        let remoteAddress = isIPv4.test(socket.remoteAddress)
-          ? socket.remoteAddress.replace(/^.*:/, "")
-          : socket.remoteAddress;
-        let data;
-        try {
-          message = JSON.parse(message);
-          data = JSON.parse(message.message);
-        } catch {
-          console.log("malformed data");
-          return;
-        }
-        //console.log(data);
-        let contact = this.contactFromUuid(data.from);
-        // TODO: server
-        if (contact != undefined && verify(contact.pub, message)) {
-          if (contact.remoteIP != remoteAddress) {
-            contact.sendReferrals();
-          }
-          contact.socket = socket;
-          contact.remoteIP = remoteAddress;
-          contact.remotePort = socket.remotePort;
-          contact.connected = true;
-          contact.try = 0;
-          contact.localPort = data.port;
-          this.ip = data.ip;
-          if (data.res != undefined) {
-            this.events_.emit("id-" + data.res, data);
-          } else {
-            switch (data.type) {
-              case "IP":
-                {
-                  if (this.current_requests.indexOf(data.body.id) === -1) {
-                    this.current_requests.push(data.body.id);
-                    data.body.hops++;
-                    if (data.body.to == this.uuid) {
-                      let message = JSON.parse(
-                        decrypt(this.priv, data.body.encrypted.message)
-                      );
-                      if (
-                        this.contactFromUuid(message.from) &&
-                        verify(
-                          this.contactFromUuid(message.from).pub,
-                          data.body.encrypted
-                        )
-                      ) {
-                        //holepunching
-                        let contact_to = this.contactFromUuid(message.from);
-                        if (!contact_to.connected) {
-                          contact_to.localPort = await getPort();
-                          if (this.servers.length > 0) {
-                            contact_to.localPort = this.servers[0].port;
-                          }
-                          contact_to.punchHole(message);
-                          console.log(
-                            sign(
-                              this.priv,
-                              encrypt(
-                                contact_to.pub,
-                                JSON.stringify({
-                                  ip: this.ip,
-                                  port: contact_to.localPort
-                                })
-                              )
-                            )
-                          );
-                          contact.respond(
-                            data.id,
-                            sign(
-                              this.priv,
-                              encrypt(
-                                contact_to.pub,
-                                JSON.stringify({
-                                  ip: this.ip,
-                                  port: contact_to.localPort
-                                })
-                              )
-                            )
-                          );
-                          setTimeout(() => {
-                            this.current_requests.splice(
-                              this.current_requests.indexOf(data.body.id),
-                              1
-                            );
-                          }, 20);
-                        } else {
-                          setTimeout(() => {
-                            this.current_requests.splice(
-                              this.current_requests.indexOf(data.body.id),
-                              1
-                            );
-                          }, 20);
-                          contact.respond(data.id);
-                        }
-                      } else {
-                        setTimeout(() => {
-                          this.current_requests.splice(
-                            this.current_requests.indexOf(data.body.id),
-                            1
-                          );
-                        }, 20);
-                        contact.respond(data.id);
-                      }
-                    } else if (
-                      this.contactFromUuid(data.body.to) != undefined
-                    ) {
-                      this.contactFromUuid(data.body.to)
-                        .send(data.body, "IP")
-                        .then(res => {
-                          this.current_requests.splice(
-                            this.current_requests.indexOf(data.body.id),
-                            1
-                          );
-                          contact.respond(data.id, res.body);
-                        })
-                        .catch(() => {
-                          setTimeout(() => {
-                            this.current_requests.splice(
-                              this.current_requests.indexOf(data.body.id),
-                              1
-                            );
-                          }, 20);
-                          contact.respond(data.id);
-                        });
-                    } else if (
-                      this.referralFromUuid(data.body.to) != undefined
-                    ) {
-                      let promises;
-                      for (let contact_ of this.referralFromUuid(
-                        data.body.to
-                      )) {
-                        promises += contact_.send(data.body, "IP");
-                      }
-                      Promise.allSettled(promises).then(results => {
-                        let responses = [];
-                        results.forEach(result => {
-                          if (result.status == "fulfilled")
-                            responses.push(result.value.body);
-                        });
-                        responses = [...new Set(responses)];
-                        if (responses.length == 1) responses = responses[0];
-                        setTimeout(() => {
-                          this.current_requests.splice(
-                            this.current_requests.indexOf(data.body.id),
-                            1
-                          );
-                        }, 20);
-                        contact.respond(data.id, responses);
-                      });
-                    } else if (data.body.hops < 20) {
-                      let promises = [];
-                      for (let contact_ of this.contacts) {
-                        if (contact_.uuid != data.from)
-                          promises.push(contact_.send(data.body, "IP"));
-                      }
-                      Promise.allSettled(promises).then(results => {
-                        let responses = [];
-                        results.forEach(result => {
-                          if (result.status == "fulfilled")
-                            responses.push(result.value.body);
-                        });
-                        responses = [...new Set(responses)];
-                        if (responses.length == 1) responses = responses[0];
-                        setTimeout(() => {
-                          this.current_requests.splice(
-                            this.current_requests.indexOf(data.body.id),
-                            1
-                          );
-                        }, 20);
-                        contact.respond(data.id, responses);
-                      });
-                    }
-                    if (this.contacts.length == 1) {
-                      setTimeout(() => {
-                        this.current_requests.splice(
-                          this.current_requests.indexOf(data.body.id),
-                          1
-                        );
-                      }, 20);
-                      contact.respond(data.id);
-                    }
-                  } else contact.respond(data.id);
-                }
-                break;
-              case "message":
-                {
-                  if (data.body != "")
-                    contact.push(Buffer.from(data.body, "base64"));
-                  contact.respond(data.id);
-                }
-                break;
-              case "referral":
-                {
-                  data.body.hops++;
-                  if (this.referralFromUuid(data.body.referent) === undefined)
-                    this.referrals.push({
-                      referent: data.body.referent,
-                      referees: [],
-                      hops: data.body.hops
-                    });
-                  let referral = this.referralFromUuid(data.body.referent);
-
-                  if (data.body.rm) {
-                    referral.referees.splice(
-                      referral.referees.indexOf(data.from),
-                      1
-                    );
-                    if (referral.referees.length == 0)
-                      this.referrals.splice(
-                        this.referrals.indexOf(referral),
-                        1
-                      );
-                  } else if (
-                    referral.referees.indexOf(data.from) != -1 &&
-                    data.body.hops >= referral.hops
-                  )
-                    referral.referees.push(data.from);
-
-                  if (data.body.hops < 20) {
-                    if (referral.referees.indexOf(data.from) != -1)
-                      for (contact_ of this.contacts) {
-                        if (contact_.uuid != data.from)
-                          contact_.send(data.body, "IP");
-                      }
-                  }
-                  this.current_requests.splice(
-                    this.current_requests.indexOf(data.body.id),
-                    1
-                  );
-                  //contact.respond(data.id);
-                }
-                break;
-              case "contact_req":
-                {
-                  data.body.hops++;
-                  if (this.current_requests.indexOf(data.body.id) === -1) {
-                    this.current_requests.push(data.body.id);
-                    if (data.body.to === this.uuid) {
-                      this.callback("contact_req", data.body.encrypted).then(
-                        res => {
-                          res.body = JSON.parse(res.body);
-                          console.log(res.body.cert);
-                          pem.getPublicKey(
-                            res.body.cert,
-                            (err, { publicKey }) => {
-                              this.addContact({
-                                uuid: res.body.from,
-                                cert: res.body.cert,
-                                pub: crypto.createPublicKey(publicKey)
-                              });
-                              console.log(
-                                this.pub
-                                  .export({
-                                    format: "der",
-                                    type: "pkcs1"
-                                  })
-                                  .toString("base64")
-                              );
-                              sym_encrypt(res.key, this.cert).then(
-                                encrypted => {
-                                  setTimeout(() => {
-                                    this.current_requests.splice(
-                                      this.current_requests.indexOf(
-                                        data.body.id
-                                      ),
-                                      1
-                                    );
-                                  }, 20);
-                                  contact.respond(data.id, encrypted);
-                                }
-                              );
-                            }
-                          );
-                        }
-                      );
-                    } else if (
-                      this.contactFromUuid(data.body.to) != undefined
-                    ) {
-                      this.contactFromUuid(data.body.to)
-                        .send(data.body, "contact_req")
-                        .then(res => {
-                          console.log(res);
-                          setTimeout(() => {
-                            this.current_requests.splice(
-                              this.current_requests.indexOf(data.body.id),
-                              1
-                            );
-                          }, 20);
-                          contact.respond(data.id, res.body);
-                        })
-                        .catch(() => {
-                          setTimeout(() => {
-                            this.current_requests.splice(
-                              this.current_requests.indexOf(data.body.id),
-                              1
-                            );
-                          }, 20);
-                          contact.respond(data.id);
-                        });
-                    } else if (
-                      this.referralFromUuid(data.body.to) != undefined
-                    ) {
-                      console.log("req");
-                      let promises;
-                      for (let contact_ of this.referralFromUuid(
-                        data.body.to
-                      )) {
-                        promises.push(contact_.send(data.body, "contact_req"));
-                      }
-                      Promise.allSettled(promises).then(results => {
-                        console.log(results);
-                        let responses = [];
-                        results.forEach(result => {
-                          if (result.status == "fulfilled")
-                            responses.push(result.value.body);
-                        });
-                        responses = [...new Set(responses)];
-                        contact.respond(data.id, responses);
-                      });
-                    } else if (data.body.hops < 20) {
-                      let promises = [];
-                      for (let contact_ of this.contacts) {
-                        if (contact_.uuid != data.from)
-                          promises.push(
-                            contact_.send(data.body, "contact_req")
-                          );
-                      }
-                      Promise.allSettled(promises).then(results => {
-                        let responses = [];
-                        results.forEach(result => {
-                          if (result.status == "fulfilled")
-                            responses.push(result.value.body);
-                        });
-                        responses = [...new Set(responses)];
-                        setTimeout(() => {
-                          this.current_requests.splice(
-                            this.current_requests.indexOf(data.body.id),
-                            1
-                          );
-                        }, 20);
-                        contact.respond(data.id, responses);
-                      });
-                    }
-                  } else contact.respond(data.id);
-                }
-                break;
-              default: {
-                contact.respond(data.id);
-              }
-            }
-          }
-        }
-      }
-    }
   }
 }
 exports.Main = Main;
@@ -585,106 +534,89 @@ class Contact extends stream.Duplex {
     this.uuid = self.uuid;
     this.try = 0;
     this.connected = false;
+    this.rxBuffer = Buffer.alloc(0);
+    this.ids = [];
+    this.config = {
+      maxBandwidth: {
+        local: self.maxBandwidth || parent.maxBandwidth,
+      },
+      messageTypes: {
+        local: self.messageTypes || parent.messageTypes,
+      },
+    };
   }
   _write(chunk) {
     this.send(chunk.toString("base64"), "message", false);
   }
   _read() {}
   /**
+   * handles socket packets
+   * @param {Buffer} data
+   */
+  handle_in(data) {
+    this.rxBuffer = Buffer.concat([this.rxBuffer, data]);
+
+    while (this.rxBuffer.length > 0) {
+      let length = this.rxBuffer.slice(0, 2).readBigInt16BE();
+
+      if (length + 4 > this.rxBuffer.length) break;
+
+      let message = this.rxBuffer.slice(4, length + 5);
+      let id = this.rxBuffer.slice(2, 3);
+      let type = this.rxBuffer.slice(3, 4).readUInt8();
+
+      this.parent.msgTypes[type].rx(
+        message,
+        id,
+        this,
+        this.parent.msgTypes[type].main
+      );
+
+      this.rxBuffer = this.rxBuffer.slice(length + 5);
+    }
+  }
+  /**
    * send a message to this Contact
    * @param {any} message - the message to be sent
-   * @param {string} type - the type of the message
+   * @param {Buffer} type - the type of the message as a UInt8/Buffer
+   * @param {boolean} addEventListener - (optional) true on default
+   * @param {Buffer} id - (optional) id of the message, used for responses
    * @returns {Promise} a Promise that resolves with the response
    */
-  send(message, type, addEventListener = true) {
+  send(message, type, addEventListener = true, id) {
     return new Promise((resolve, reject) => {
       //console.log("write");
       let responded = false;
-      let id = Math.floor(Math.random() * 10000);
-      console.log({
-        from: this.parent.uuid,
-        type: type,
-        body: message,
-        id: id,
-        ip: this.socket.remoteAddress,
-        port: this.socket.remotePort
-      });
+      if (!id) id = genID(this); // Add this
+      this.ids.push(id);
+      let length = message.length;
       this.socket.write(
-        JSON.stringify(
-          sign(
-            this.parent.priv,
-            JSON.stringify({
-              from: this.parent.uuid,
-              type: type,
-              body: message,
-              id: id,
-              ip: this.socket.remoteAddress,
-              port: this.socket.remotePort
-            })
-          )
-        )
+        Buffer.concat([length, id, Buffer.allocunsafe(1).writeUInt8(type), message])
       );
 
       if (addEventListener)
-        this.parent.events_.prependOnceListener("id-" + id, data => {
+        this.prependOnceListener("id-" + id, (data) => {
           responded = true;
+          this.ids.splice(this.ids.indexOf(id), 1)
           resolve(data);
         });
-      this.socket.on("error", err => {
+      this.socket.on("error", (err) => {
         debugger;
         responded = true;
         this.connected = false;
-        this.parent.events_.removeAllListeners("id-" + id);
+        this.removeAllListeners("id-" + id);
         console.log("send from " + this.parent.uuid + err);
         this.connect().then(() => {
-          this.send(message, type).then(res => resolve(res));
+          this.send(message, type).then((res) => resolve(res));
         });
       });
       setTimeout(() => {
         if (!responded) {
-          this.parent.events_.removeAllListeners("id-" + id);
+          this.removeAllListeners("id-" + id);
+          this.ids.splice(this.ids.indexOf(id), 1)
           resolve("timeout");
         }
       }, 60000);
-    });
-  }
-  /**
-   * Responds to a message
-   * @param {number} id - the message id
-   * @param {any} message - what to respond with
-   */
-  respond(id, message = "") {
-    //console.log("respond");
-
-    //console.log("write");
-    console.log({
-      from: this.parent.uuid,
-      body: message,
-      res: id,
-      ip: this.socket.remoteAddress,
-      port: this.socket.remotePort
-    });
-    this.socket.write(
-      JSON.stringify(
-        sign(
-          this.parent.priv,
-          JSON.stringify({
-            from: this.parent.uuid,
-            body: message,
-            res: id,
-            ip: this.socket.remoteAddress,
-            port: this.socket.remotePort
-          })
-        )
-      )
-    );
-
-    this.socket.on("error", err => {
-      debugger;
-      console.warn(err);
-      this.connect(contact).then(() => {
-        this.respond(id, message);
-      });
     });
   }
   /**
@@ -696,24 +628,24 @@ class Contact extends stream.Duplex {
       if (this.socket && !this.socket.destroyed && !this.socket._hadError) {
         this.send("", "message");
       } else {
-        if (!this.parent.servers.find(server => this.port == server.port)) {
+        if (!this.parent.servers.find((server) => this.port == server.port)) {
           this.socket = tls.connect({
             port: this.remotePort,
             host: this.remoteIP,
             ca: [this.cert],
             checkServerIdentity: () => {
               return null;
-            }
+            },
           });
           this.socket.setKeepAlive(true);
           this.socket.on("ready", () => {
             this.send("", "message");
             resolve();
           });
-          this.socket.on("data", data => {
+          this.socket.on("data", (data) => {
             this.parent.handle_in(this.socket, data);
           });
-          this.socket.on("error", err => {
+          this.socket.on("error", (err) => {
             if (
               this.connected &&
               this.parent.referralFromUuid(this.uuid) != undefined
@@ -729,7 +661,7 @@ class Contact extends stream.Duplex {
             this.try++;
             if (this.try < 10) {
               setTimeout(() => {
-                this.connect().catch(err => {
+                this.connect().catch((err) => {
                   reject(err);
                 });
               }, 10);
@@ -755,7 +687,7 @@ class Contact extends stream.Duplex {
             this.socket.end();
             this.try++;
             if (this.try < 20) {
-              this.connect(contact).catch(err => {
+              this.connect(contact).catch((err) => {
                 reject(err);
               });
             } else if (this.try < 50) {
@@ -798,19 +730,19 @@ class Contact extends stream.Duplex {
                   JSON.stringify({
                     from: this.parent.uuid,
                     IP: this.parent.ip,
-                    port: this.localPort
+                    port: this.localPort,
                   })
                 )
               ),
-              id
+              id,
             },
             "IP"
           )
         );
     }
-    Promise.allSettled(promises).then(results => {
-      results = results.filter(res => res.status == "fulfilled");
-      let responses = [...new Set(results.map(res => res.value.body))];
+    Promise.allSettled(promises).then((results) => {
+      results = results.filter((res) => res.status == "fulfilled");
+      let responses = [...new Set(results.map((res) => res.value.body))];
       if (responses.length == 0) console.log("No responses to IP");
       let awnsers = [];
       for (let res of responses) {
@@ -845,7 +777,7 @@ class Contact extends stream.Duplex {
             referent: uuid,
             hops: 1,
             rm: rm,
-            id
+            id,
           },
           "referral",
           false
@@ -860,21 +792,22 @@ class Contact extends stream.Duplex {
    * @param {number} timeout
    */
   punchHole(data, timeout = 0) {
+    debugger;
     let port = this.localPort + 1;
     port--;
     if (!this.connected) {
-      getPort().then(port => console.log(port));
-      if (this.parent.servers.find(server => server.port == port))
-        getPort().then(p => (port = p));
+      getPort().then((port) => console.log(port));
+      if (this.parent.servers.find((server) => server.port == port))
+        getPort().then((p) => (port = p));
       setTimeout(() => {
         console.log("punch on " + port);
         let socket = net.createConnection({
           host: data.ip,
           port: data.port,
           localPort: port,
-          timeout: 100
+          timeout: 100,
         });
-        socket.on("data", data => {
+        socket.on("data", (data) => {
           this.parent.handle_in(socket, data);
         });
         socket.on("ready", () => {
@@ -882,29 +815,29 @@ class Contact extends stream.Duplex {
           this.socket = socket;
           this.send("", "message");
         });
-        socket.on("error", err => {
+        socket.on("error", (err) => {
           console.log(err);
         });
-        socket.on("close", err => {
+        socket.on("close", (err) => {
           console.log("server: " + this.parent.uuid);
 
-          if (!this.parent.servers.find(server => server.port == port)) {
-            let server = net.createServer(socket => {
+          if (!this.parent.servers.find((server) => server.port == port)) {
+            let server = net.createServer((socket) => {
               socket.on("ready", () => {
                 this.connected = true;
                 this.socket = socket;
               });
-              socket.on("data", data => {
-                if (!this.parent.servers.find(server_ => server == server_))
+              socket.on("data", (data) => {
+                if (!this.parent.servers.find((server_) => server == server_))
                   this.parent.servers.push(server);
 
                 this.parent.handle_in(socket, data);
               });
-              socket.on("error", err => {
+              socket.on("error", (err) => {
                 this.connected = false;
                 this.parent.servers.splice(
                   this.parent.servers.indexOf(
-                    this.parent.servers.find(server_ => server == server_)
+                    this.parent.servers.find((server_) => server == server_)
                   ),
                   1
                 );
@@ -913,9 +846,9 @@ class Contact extends stream.Duplex {
             server.listen(port);
             this.parent.servers.push({
               server: server,
-              port: port
+              port: port,
             });
-            server.on("error", err => {
+            server.on("error", (err) => {
               console.log(err);
             });
           } else console.log("already listening on port " + port);
@@ -967,7 +900,7 @@ function sym_encrypt(key, message) {
 
     let encrypted = "";
     cipher.setEncoding("base64");
-    cipher.on("data", chunk => (encrypted += chunk));
+    cipher.on("data", (chunk) => (encrypted += chunk));
     cipher.on("end", () =>
       resolve({ message: encrypted, iv: Buffer.from(iv).toString("base64") })
     );
@@ -991,7 +924,7 @@ function sym_decrypt(key, { iv, message }) {
 
     let decrypted = "";
 
-    decipher.on("data", chunk => (decrypted += chunk));
+    decipher.on("data", (chunk) => (decrypted += chunk));
     decipher.on("end", () => {
       resolve(decrypted);
     });
@@ -1013,7 +946,7 @@ function encrypt(key, message) {
       {
         key: key,
         padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: "sha256"
+        oaepHash: "sha256",
       },
       Buffer.from(message)
     )
@@ -1032,30 +965,18 @@ function decrypt(key, message) {
     {
       key: key,
       padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-      oaepHash: "sha256"
+      oaepHash: "sha256",
     },
     Buffer.from(message, "base64")
   );
   return message;
 }
-/**
- * split a string into json strings
- * @param {string} data - the string to be split
- * @returns {string[]} json strings
- */
-function splitMessages(data) {
-  let chars = data.split("");
-  let brackets = 0;
-  let out = [""];
-  let j = 0;
-  for (let i = 0; i < chars.length; i++) {
-    out[j] += chars[i];
-    if (chars[i] == "{") brackets++;
-    if (chars[i] == "}") brackets--;
-    if (brackets == 0) {
-      j++;
-      out[j] = "";
-    }
+function genID(self, size = 1) {
+  let done = false;
+  let id;
+  while (!done) {
+    id = crypto.randomBytes(size)
+    if (self.ids.indexOf(id) !== -1) done = true;
   }
-  return out;
+  return id;
 }
